@@ -2,6 +2,7 @@
 name = "maono"
 version = "0.6.0"
 edition = "2024"
+rust-version = "1.89"
 description = "Control a Maono PD100W wireless microphone from a terminal UI or the command line"
 license = "MIT"
 repository = "https://github.com/shahriyardx/maono"
@@ -11,6 +12,8 @@ categories = ["command-line-utilities", "hardware-support"]
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
 name = "maono"

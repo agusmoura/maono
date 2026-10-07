@@ -4,3 +4,4 @@
 //! device through exactly one implementation.
 
 pub mod mic;
+pub mod proto;
