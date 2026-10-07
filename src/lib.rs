@@ -6,6 +6,7 @@
 pub mod config;
 pub mod descriptor;
 pub mod device;
+pub mod engine;
 pub mod filter;
 pub mod filterctl;
 pub mod mic;
