@@ -28,6 +28,7 @@ manejarse con teclado y tener perfiles que cambien todo de una vez.
 - Compresor por software con `lsp-plugins-ladspa` (ya instalado).
 - El monitoreo y el volumen de auriculares del mic van en una sección chica y plegada.
 - Fuente por defecto: `maono_clean`.
+- Monitor "Live": escuchar en tiempo real la fuente limpia o la cruda por la salida por defecto (agregado el 2026-10-07).
 
 **"Nada hardcodeado"**
 
@@ -144,6 +145,10 @@ captura ─▶ HPF (2 × bq_highpass, 24 dB/oct) ─▶ banda 1..5 ─▶ LPF (b
   - El panel avisa que el audio se corta ~1 s.
 - **Dependencias ausentes** (LSP o RNNoise): esa etapa no se genera. La UI la muestra deshabilitada, con la línea de instalación. Un perfil que la pide se aplica sin ella y el ack lo dice explícitamente: "aplicado sin compresor: falta lsp-plugins-ladspa".
 - **Verificación tras cargar:** el nodo `maono_clean` existe y sus Props tienen los valores esperados. Si falla, se restaura el conf anterior, se reinicia y se reporta. Nunca se da éxito solo porque systemd dice "active".
+- **Monitor en vivo:** `serve` corre un `pw-loopback` (mono) desde `maono_clean` o desde el mic crudo hacia la salida por defecto.
+  - Nunca se guarda: arranca apagado y se corta al salir `serve`.
+  - Si la salida por defecto no parece auriculares (puerto, `form_factor` o ícono), se niega, salvo `force`, porque por parlantes se acopla.
+  - Por Bluetooth se escucha con ~150–250 ms de retraso.
 - **Fuente por defecto:** `maono source clean|raw` usa `pactl set-default-source` y verifica el resultado. WirePlumber la persiste por su cuenta. No cambia las apps que fijaron su propia entrada (Discord, por ejemplo); el panel lo aclara.
 
 ### 3.5 Perfiles
@@ -186,6 +191,7 @@ Comandos:
 {"id":10,"cmd":"eq.preset.save","name":"Mi EQ"}
 {"id":11,"cmd":"light.custom","op":"add","hsv":[330,1,1]}
 {"id":12,"cmd":"config.set","changes":{"applyOnReconnect":false}}
+{"id":14,"cmd":"monitor.set","on":true,"source":"clean","force":false}
 {"id":13,"cmd":"refresh"}
 ```
 
@@ -216,6 +222,7 @@ Alto máximo 640, con scroll.
 - nombre, batería (⚡ si carga) y firmware;
 - medidor de nivel nativo (`PwNodePeakMonitor`) sobre la **fuente seleccionada como predeterminada**. Se rotula así porque no garantiza lo que recibe una app que fijó otra entrada. Avisa clipping cerca de 0 dBFS;
 - interruptor de mute;
+- interruptor **Live** con chips **Limpio / Crudo** (para comparar A/B). Si la salida no son auriculares, avisa y pide confirmación antes de forzar;
 - selector de perfil con un punto si hay cambios sin guardar, y la acción "Reaplicar perfil" (descarta los cambios).
 
 **Pestañas** (con glifo y etiqueta corta; se eligen con `1`–`6`, o `h`/`l` sobre la tira):

@@ -22,7 +22,7 @@
 - JSONL protocol version 1: one JSON object per line, stdout carries only JSONL, logs go to stderr. Every request gets exactly one `ack`.
 - Files: `~/.config/maono/{config.json, filter.json, profiles/<id>.json, eq/<id>.json}`, `~/.config/pipewire/filter-chain.conf.d/maono-clean.conf`; socket and lock in `$XDG_RUNTIME_DIR` (`maono.sock`, `maono.lock`). All file writes are atomic (temp file + rename). Corrupt files are reported, never deleted.
 - Ranges, options, presets, plugin labels/ports and factory profiles live in embedded JSON data (`devices/`, `presets/`, `profiles/`), not in Rust literals. Only the safety allowlist is deliberately compiled in.
-- Real-mic write tests happen only in Task 13, after Agus explicitly authorizes them.
+- Real-mic write tests happen only in Task 14, after Agus explicitly authorizes them.
 
 ## Deliberate simplifications vs the spec
 
@@ -2086,7 +2086,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 }
 ```
 
-Switch polarities come from the LADSPA port hints (Task-8-era dump): LSP's `Bypass` is `0x205` = DEFAULT_0 | TOGGLED, so 0 means processing and 1 means bypassed; RNNoise's `Dry Mix` is `0x203` = DEFAULT_0, so 0 means fully processed and 1 fully dry. Task 13 confirms both by measurement, and a wrong polarity is fixed in this JSON alone (tests read the values from the schema).
+Switch polarities come from the LADSPA port hints (Task-8-era dump): LSP's `Bypass` is `0x205` = DEFAULT_0 | TOGGLED, so 0 means processing and 1 means bypassed; RNNoise's `Dry Mix` is `0x203` = DEFAULT_0, so 0 means fully processed and 1 fully dry. Task 14 confirms both by measurement, and a wrong polarity is fixed in this JSON alone (tests read the values from the schema).
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -5143,7 +5143,7 @@ Expected:
 - `profile list` shows 4 profiles;
 - `schema` prints JSON.
 
-Direct mode runs with `core.owner = false`, so these three commands write nothing to the mic or PipeWire (they only create `~/.config/maono/` with the factory profiles). Do not run `profile apply`, `filter set` or `source` here; that is Task 13.
+Direct mode runs with `core.owner = false`, so these three commands write nothing to the mic or PipeWire (they only create `~/.config/maono/` with the factory profiles). Do not run `profile apply`, `filter set`, `source` or `monitor` here; that is Task 14.
 
 - [ ] **Step 7: Commit**
 
@@ -5156,7 +5156,307 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 13: Install and verify on the real mic (REQUIRES Agus's explicit go-ahead)
+### Task 13: Live monitor (hear the clean or raw source in real time)
+
+Added 2026-10-07 at Agus's request ("un switch Live para escuchar en tiempo real cómo queda la config"). Spec §3.4/§4/§5.1 were amended to match.
+
+**Files:**
+- Modify: `devices/filter.json` (add `monitor`)
+- Modify: `src/filter.rs` (`FilterSchema.monitor`)
+- Modify: `src/pw.rs` (`Audio` gets four monitor methods; `System::new`; `FakeAudio` grows matching fields)
+- Modify: `src/engine.rs` (`monitor.set` command, `monitor` in state)
+- Modify: `src/serve.rs`, `src/client.rs` (construct `System` with `System::new`)
+
+**Interfaces:**
+- Consumes: `Audio`, `Core`, `FilterSchema`
+- Produces:
+  - `filter::MonitorMeta { node: String, latency_ms: u32, headphone_hints: Vec<String> }`, available as `FilterSchema.monitor`
+  - `Audio::{start_monitor(&mut self, source: &str) -> io::Result<()>, stop_monitor(&mut self), monitor_running(&mut self) -> bool, output_is_headphones(&mut self) -> Option<bool>}`
+  - `pw::System::new(FilterSchema) -> System`, which kills a stale monitor left over from a crashed serve
+  - `pw::sink_is_headphones(&Value, &[String]) -> bool`
+  - Command `monitor.set {on: bool, source?: "clean"|"raw", force?: bool}`; the state gains `"monitor": {"on", "source", "headphones"}`
+  - CLI `maono monitor on [clean|raw] [--force] | off`
+
+The monitor is a `pw-loopback` child of serve: mono capture from the chosen source, played into the default output. It is off at every serve start (never persisted), stops on `monitor.set {on:false}`, and stops when serve exits (`Drop`). When the default output does not look like headphones, `on` is refused unless `force` is set, because a monitor through speakers feeds back.
+
+- [ ] **Step 1: Data**
+
+Add to `devices/filter.json`, after `"bypass"`:
+
+```json
+  "monitor": {"node": "maono-monitor", "latencyMs": 20, "headphoneHints": ["headphone", "headset", "earphone"]},
+```
+
+Add to `src/filter.rs`:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorMeta {
+    pub node: String,
+    pub latency_ms: u32,
+    pub headphone_hints: Vec<String>,
+}
+```
+
+and the field `pub monitor: MonitorMeta,` in `FilterSchema`, after `bypass`.
+
+- [ ] **Step 2: Write the failing tests**
+
+In `src/pw.rs` `mod tests`:
+
+```rust
+    #[test]
+    fn headphone_detection_uses_port_form_factor_and_icon() {
+        let hints: Vec<String> = ["headphone", "headset", "earphone"].iter().map(|s| s.to_string()).collect();
+        let speaker = serde_json::json!({"name": "alsa_output.pci", "active_port": "analog-output-speaker", "properties": {}});
+        let jack = serde_json::json!({"name": "alsa_output.pci", "active_port": "analog-output-headphones", "properties": {}});
+        let bt = serde_json::json!({"name": "bluez_output.x", "active_port": null, "properties": {"device.form_factor": "headset", "device.icon_name": "audio-headset-bluetooth"}});
+        assert!(!sink_is_headphones(&speaker, &hints));
+        assert!(sink_is_headphones(&jack, &hints));
+        assert!(sink_is_headphones(&bt, &hints));
+    }
+```
+
+In `src/engine.rs` `mod tests`:
+
+```rust
+    #[test]
+    fn monitor_refuses_speakers_unless_forced() {
+        let (mut c, _fake) = connected();
+        c.filterctl.audio.headphones = Some(false);
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}));
+        assert_eq!((a["ok"].clone(), a["error"].clone()), (json!(false), json!("not-headphones")));
+        assert_eq!(c.filterctl.audio.monitor, None);
+        let a = ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "force": true}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+    }
+
+    #[test]
+    fn monitor_switches_source_and_stops() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true, "source": "raw"}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("alsa_input.test"));
+        let st = c.state_json();
+        assert_eq!(st["monitor"], json!({"on": true, "source": "raw", "headphones": true}));
+        assert_eq!(ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "source": "clean"}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "monitor.set", "on": false}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor, None);
+        assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "monitor.set", "on": true, "source": "loud"}))["ok"], false);
+    }
+```
+
+In `src/client.rs` `argv_maps_to_requests`, add:
+
+```rust
+        assert_eq!(to_request(&["monitor", "on", "raw", "--force"]).unwrap(), json!({"cmd": "monitor.set", "on": true, "source": "raw", "force": true}));
+        assert_eq!(to_request(&["monitor", "on"]).unwrap(), json!({"cmd": "monitor.set", "on": true, "force": false}));
+        assert_eq!(to_request(&["monitor", "off"]).unwrap(), json!({"cmd": "monitor.set", "on": false}));
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `mise exec rust@stable -- cargo test --lib -- monitor headphone`
+Expected: compile errors `no method named start_monitor`, `cannot find function sink_is_headphones`, `no field monitor on FakeAudio`.
+
+- [ ] **Step 4: Implement `pw.rs`**
+
+Add to the `Audio` trait:
+
+```rust
+    /// Play `source` (a PipeWire source node name) into the default output, replacing a running monitor.
+    fn start_monitor(&mut self, source: &str) -> io::Result<()>;
+    fn stop_monitor(&mut self);
+    fn monitor_running(&mut self) -> bool;
+    /// Some(true/false) when the default output clearly is / is not headphones; None when unknown.
+    fn output_is_headphones(&mut self) -> Option<bool>;
+```
+
+Add the pure helper:
+
+```rust
+pub fn sink_is_headphones(sink: &Value, hints: &[String]) -> bool {
+    let p = &sink["properties"];
+    let text = [sink["active_port"].as_str(), p["device.form_factor"].as_str(), p["device.icon_name"].as_str()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    hints.iter().any(|h| text.contains(h.as_str()))
+}
+```
+
+Change `System` (replace the struct and add a constructor and `Drop`):
+
+```rust
+pub struct System {
+    pub schema: FilterSchema,
+    monitor: Option<std::process::Child>,
+}
+
+impl System {
+    /// Also kills a monitor a crashed serve may have left playing.
+    pub fn new(schema: FilterSchema) -> Self {
+        let _ = Command::new("pkill").args(["-f", &format!("pw-loopback -n {}", schema.monitor.node)]).status();
+        System { schema, monitor: None }
+    }
+}
+
+impl Drop for System {
+    fn drop(&mut self) {
+        self.stop_monitor();
+    }
+}
+```
+
+and implement the four methods inside `impl Audio for System`:
+
+```rust
+    fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+        self.stop_monitor();
+        let m = &self.schema.monitor;
+        let child = Command::new("pw-loopback")
+            .args(["-n", m.node.as_str(), "-c", "1", "-m", "[ MONO ]", "-l", &m.latency_ms.to_string(), "-C", source])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        self.monitor = Some(child);
+        Ok(())
+    }
+
+    fn stop_monitor(&mut self) {
+        if let Some(mut c) = self.monitor.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    fn monitor_running(&mut self) -> bool {
+        self.monitor.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+
+    fn output_is_headphones(&mut self) -> Option<bool> {
+        let default = run("pactl", &["get-default-sink"]).ok()?.trim().to_string();
+        let sinks: Value = serde_json::from_str(&run("pactl", &["-f", "json", "list", "sinks"]).ok()?).ok()?;
+        let sink = sinks.as_array()?.iter().find(|s| s["name"] == default.as_str())?;
+        Some(sink_is_headphones(sink, &self.schema.monitor.headphone_hints))
+    }
+```
+
+In `pw::fake::FakeAudio`, add the fields `pub monitor: Option<String>` (initialised to `None`) and `pub headphones: Option<bool>` (initialised to `Some(true)`), and implement:
+
+```rust
+        fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+            self.monitor = Some(source.into());
+            Ok(())
+        }
+        fn stop_monitor(&mut self) {
+            self.monitor = None;
+        }
+        fn monitor_running(&mut self) -> bool {
+            self.monitor.is_some()
+        }
+        fn output_is_headphones(&mut self) -> Option<bool> {
+            self.headphones
+        }
+```
+
+In `src/serve.rs` and `src/client.rs`, replace `pw::System { schema: FilterSchema::load() }` with `pw::System::new(FilterSchema::load())`.
+
+- [ ] **Step 5: Implement `engine.rs`**
+
+Add the command variant:
+
+```rust
+    #[serde(rename = "monitor.set")]
+    MonitorSet {
+        on: bool,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
+```
+
+Add the field `monitor_source: String` to `Core` (initialised to `"clean".into()` in `new`), and in `state_json` add, next to `"deps"`:
+
+```rust
+            "monitor": {
+                "on": self.filterctl.audio.monitor_running(),
+                "source": self.monitor_source,
+                "headphones": self.filterctl.audio.output_is_headphones(),
+            },
+```
+
+(`state_json` reads the audio state before building the `json!`, so bind `let monitor_on = …; let headphones = …;` first if the borrow checker objects to calling `&mut self` methods inside the macro.)
+
+Handler arm:
+
+```rust
+            Cmd::MonitorSet { on, source, force } => {
+                if let Some(s) = source {
+                    if s != "clean" && s != "raw" {
+                        return Err(err("source must be clean or raw"));
+                    }
+                    self.monitor_source = s;
+                }
+                if !on {
+                    self.filterctl.audio.stop_monitor();
+                    return Ok(json!({}));
+                }
+                if !force && self.filterctl.audio.output_is_headphones() != Some(true) {
+                    return Err(json!({
+                        "error": "not-headphones",
+                        "message": "the default output does not look like headphones; monitoring through speakers feeds back (send force: true to do it anyway)",
+                    }));
+                }
+                let node = match self.monitor_source.as_str() {
+                    "raw" => self.filterctl.audio.capture_target().ok_or_else(|| err("the mic is not visible in PipeWire"))?,
+                    _ => self.fschema.source.node.clone(),
+                };
+                self.filterctl.audio.start_monitor(&node).map_err(err)?;
+                Ok(json!({ "monitoring": node }))
+            }
+```
+
+- [ ] **Step 6: CLI**
+
+In `client::to_request`, before the catch-all arm:
+
+```rust
+        ["monitor", "off"] => json!({"cmd": "monitor.set", "on": false}),
+        ["monitor", "on", rest @ ..] => {
+            let mut req = json!({"cmd": "monitor.set", "on": true, "force": rest.contains(&"--force")});
+            if let Some(src) = rest.iter().find(|a| matches!(**a, "clean" | "raw")) {
+                req["source"] = json!(src);
+            }
+            req
+        }
+```
+
+Add `maono monitor on [clean|raw] [--force] | off   hear the mic live in the default output` to `USAGE` in `main.rs`.
+
+- [ ] **Step 7: Run tests**
+
+Run: `mise exec rust@stable -- cargo test --lib`
+Expected: everything passes, including the 2 new engine tests, the pw headphone test and the extended client test.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add devices/filter.json src/filter.rs src/pw.rs src/engine.rs src/serve.rs src/client.rs src/main.rs
+git commit -m "feat: live monitor through pw-loopback, refused on speakers unless forced
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 14: Install and verify on the real mic (REQUIRES Agus's explicit go-ahead)
 
 **Do not start this task until Agus has said yes in the conversation.** It writes to the mic and restarts `filter-chain.service`, so audio from the clean source drops for about 1 s each time.
 
@@ -5210,14 +5510,26 @@ If B is still suppressed, flip `rnnoise.switch` in `devices/filter.json` to `{"p
 3. Ask Agus to unplug the cable and plug it back in: stdout shows `"device":"disconnected"`, then `"device":"connected"` and `{"ev":"reapplied","profile":"llamada",…}`, and the mute state stays what it was.
 4. Stop serve with Ctrl+D (stdin EOF): the process exits and `$XDG_RUNTIME_DIR/maono.sock` is gone.
 
-- [ ] **Step 5: Restore what Agus had, record results, commit**
+- [ ] **Step 5: Live monitor**
+
+With headphones as the default output (the XM5 or wired headphones), and with Agus's ears on them:
+
+1. Run `maono monitor on`: he hears himself, filtered. Typing should be gone between words.
+2. Run `maono monitor on raw`: he hears the unfiltered mic, typing included.
+3. Run `maono monitor off`.
+4. Switch the default output to the PC speakers (`pactl set-default-sink alsa_output.pci-0000_75_00.6.analog-stereo`). `maono monitor on` must refuse with `not-headphones`. Do **not** run it with `--force`.
+5. Restore his default sink.
+
+Bluetooth adds roughly 150–250 ms of latency, so the monitor sounds like a slight echo of his own voice. Note in the report how it feels.
+
+- [ ] **Step 6: Restore what Agus had, record results, commit**
 
 ```bash
 python3 "$S/cal.py" restore "$S/snap-before-task13.json"
 maono filter set rnnoise.on=true rnnoise.vad=85 comp.on=false
 ```
 
-Append a "Task 13 results" table to §8 of `docs/protocol/pd100w.md` covering polarities, button latency, reconnect behaviour and the final values. Then:
+Append a "Task 14 results" table to §8 of `docs/protocol/pd100w.md` covering polarities, button latency, reconnect behaviour, the live monitor and the final values. Then:
 
 ```bash
 git add devices/filter.json docs/protocol/pd100w.md
