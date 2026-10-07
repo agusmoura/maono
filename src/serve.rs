@@ -149,7 +149,7 @@ pub fn main() -> io::Result<()> {
             thread::spawn(move || serve_client(conn, tx));
         }
     });
-    let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System { schema: FilterSchema::load() });
+    let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System::new(FilterSchema::load()));
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let r = run(&mut core, rx, &mut out, &mut open_device, Duration::from_millis(50), Duration::from_secs(1), Duration::from_secs(30));

@@ -85,6 +85,14 @@ enum Cmd {
     ConfigSet { changes: Values },
     #[serde(rename = "recover")]
     Recover,
+    #[serde(rename = "monitor.set")]
+    MonitorSet {
+        on: bool,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 fn err(msg: impl std::fmt::Display) -> Value {
@@ -107,6 +115,8 @@ pub struct Core<A: Audio> {
     /// True in `maono serve`: silence the HID meter and keep the filter chain up on
     /// connect. The one-shot CLI sets it false so a read never writes anything.
     pub owner: bool,
+    /// Which source `monitor.set` plays when it is turned on; never persisted.
+    monitor_source: String,
     partial: Option<Value>,
     /// Unsaved mic/filter values from before a reconnect reapplied the profile.
     recover: Option<(Values, FilterState)>,
@@ -143,6 +153,7 @@ impl<A: Audio> Core<A> {
             model: None,
             mic: Values::new(),
             owner: true,
+            monitor_source: "clean".into(),
             partial: None,
             recover: None,
             warnings,
@@ -186,6 +197,8 @@ impl<A: Audio> Core<A> {
     pub fn state_json(&mut self) -> Value {
         let deps = self.filterctl.audio.deps();
         let default_source = self.filterctl.audio.default_source();
+        let monitor_on = self.filterctl.audio.monitor_running();
+        let headphones = self.filterctl.audio.output_is_headphones();
         let active = self.config.active_profile.clone();
         let dirty = active
             .as_deref()
@@ -203,6 +216,11 @@ impl<A: Audio> Core<A> {
             "partial": self.partial,
             "defaultSource": default_source,
             "cleanSource": self.fschema.source.node,
+            "monitor": {
+                "on": monitor_on,
+                "source": self.monitor_source,
+                "headphones": headphones,
+            },
         })
     }
 
@@ -459,6 +477,30 @@ impl<A: Audio> Core<A> {
                 self.filterctl.apply(&filt).map_err(err)?;
                 self.filter = filt;
                 Ok(v)
+            }
+            Cmd::MonitorSet { on, source, force } => {
+                if let Some(s) = source {
+                    if s != "clean" && s != "raw" {
+                        return Err(err("source must be clean or raw"));
+                    }
+                    self.monitor_source = s;
+                }
+                if !on {
+                    self.filterctl.audio.stop_monitor();
+                    return Ok(json!({}));
+                }
+                if !force && self.filterctl.audio.output_is_headphones() != Some(true) {
+                    return Err(json!({
+                        "error": "not-headphones",
+                        "message": "the default output does not look like headphones; monitoring through speakers feeds back (send force: true to do it anyway)",
+                    }));
+                }
+                let node = match self.monitor_source.as_str() {
+                    "raw" => self.filterctl.audio.capture_target().ok_or_else(|| err("the mic is not visible in PipeWire"))?,
+                    _ => self.fschema.source.node.clone(),
+                };
+                self.filterctl.audio.start_monitor(&node).map_err(err)?;
+                Ok(json!({ "monitoring": node }))
             }
         }
     }
@@ -837,6 +879,32 @@ mod tests {
         assert_eq!(c.config.active_profile, None);
         let list = ask(&mut c, json!({"id": 6, "cmd": "profile.list"}));
         assert_eq!(list["profiles"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn monitor_refuses_speakers_unless_forced() {
+        let (mut c, _fake) = connected();
+        c.filterctl.audio.headphones = Some(false);
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}));
+        assert_eq!((a["ok"].clone(), a["error"].clone()), (json!(false), json!("not-headphones")));
+        assert_eq!(c.filterctl.audio.monitor, None);
+        let a = ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "force": true}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+    }
+
+    #[test]
+    fn monitor_switches_source_and_stops() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true, "source": "raw"}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("alsa_input.test"));
+        let st = c.state_json();
+        assert_eq!(st["monitor"], json!({"on": true, "source": "raw", "headphones": true}));
+        assert_eq!(ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "source": "clean"}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "monitor.set", "on": false}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor, None);
+        assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "monitor.set", "on": true, "source": "loud"}))["ok"], false);
     }
 
     #[test]

@@ -17,6 +17,24 @@ pub trait Audio {
     fn restart(&mut self) -> io::Result<()>;
     fn default_source(&mut self) -> Option<String>;
     fn set_default_source(&mut self, name: &str) -> io::Result<()>;
+    /// Play `source` (a PipeWire source node name) into the default output, replacing a running monitor.
+    fn start_monitor(&mut self, source: &str) -> io::Result<()>;
+    fn stop_monitor(&mut self);
+    fn monitor_running(&mut self) -> bool;
+    /// Some(true/false) when the default output clearly is / is not headphones; None when unknown.
+    fn output_is_headphones(&mut self) -> Option<bool>;
+}
+
+/// True when a sink's active port, form factor or icon name mentions one of `hints`.
+pub fn sink_is_headphones(sink: &Value, hints: &[String]) -> bool {
+    let p = &sink["properties"];
+    let text = [sink["active_port"].as_str(), p["device.form_factor"].as_str(), p["device.icon_name"].as_str()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    hints.iter().any(|h| text.contains(h.as_str()))
 }
 
 fn props(o: &Value) -> &Value {
@@ -96,6 +114,21 @@ fn ladspa_dirs() -> Vec<PathBuf> {
 
 pub struct System {
     pub schema: FilterSchema,
+    monitor: Option<std::process::Child>,
+}
+
+impl System {
+    /// Also kills a monitor a crashed serve may have left playing.
+    pub fn new(schema: FilterSchema) -> Self {
+        let _ = Command::new("pkill").args(["-f", &format!("pw-loopback -n {}", schema.monitor.node)]).status();
+        System { schema, monitor: None }
+    }
+}
+
+impl Drop for System {
+    fn drop(&mut self) {
+        self.stop_monitor();
+    }
 }
 
 impl Audio for System {
@@ -130,6 +163,37 @@ impl Audio for System {
     fn set_default_source(&mut self, name: &str) -> io::Result<()> {
         run("pactl", &["set-default-source", name]).map(drop)
     }
+
+    fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+        self.stop_monitor();
+        let m = &self.schema.monitor;
+        let child = Command::new("pw-loopback")
+            .args(["-n", m.node.as_str(), "-c", "1", "-m", "[ MONO ]", "-l", &m.latency_ms.to_string(), "-C", source])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        self.monitor = Some(child);
+        Ok(())
+    }
+
+    fn stop_monitor(&mut self) {
+        if let Some(mut c) = self.monitor.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    fn monitor_running(&mut self) -> bool {
+        self.monitor.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+
+    fn output_is_headphones(&mut self) -> Option<bool> {
+        let default = run("pactl", &["get-default-sink"]).ok()?.trim().to_string();
+        let sinks: Value = serde_json::from_str(&run("pactl", &["-f", "json", "list", "sinks"]).ok()?).ok()?;
+        let sink = sinks.as_array()?.iter().find(|s| s["name"] == default.as_str())?;
+        Some(sink_is_headphones(sink, &self.schema.monitor.headphone_hints))
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +212,8 @@ pub mod fake {
         pub default: Option<String>,
         /// restart() returns Err once `restarts` exceeds this value.
         pub fail_restart_after: Option<u32>,
+        pub monitor: Option<String>,
+        pub headphones: Option<bool>,
         conf: PathBuf,
     }
 
@@ -162,6 +228,8 @@ pub mod fake {
                 broken: false,
                 default: None,
                 fail_restart_after: None,
+                monitor: None,
+                headphones: Some(true),
                 conf: conf.to_path_buf(),
             }
         }
@@ -217,6 +285,19 @@ pub mod fake {
             self.default = Some(name.into());
             Ok(())
         }
+        fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+            self.monitor = Some(source.into());
+            Ok(())
+        }
+        fn stop_monitor(&mut self) {
+            self.monitor = None;
+        }
+        fn monitor_running(&mut self) -> bool {
+            self.monitor.is_some()
+        }
+        fn output_is_headphones(&mut self) -> Option<bool> {
+            self.headphones
+        }
     }
 }
 
@@ -248,5 +329,16 @@ mod tests {
     fn props_arg_formats_pw_cli_syntax() {
         assert_eq!(props_arg(&[("hp1:Freq".into(), 120.0), ("rnnoise:VAD Threshold (%)".into(), 80.0)]),
             "{ params = [ \"hp1:Freq\" 120 \"rnnoise:VAD Threshold (%)\" 80 ] }");
+    }
+
+    #[test]
+    fn headphone_detection_uses_port_form_factor_and_icon() {
+        let hints: Vec<String> = ["headphone", "headset", "earphone"].iter().map(|s| s.to_string()).collect();
+        let speaker = serde_json::json!({"name": "alsa_output.pci", "active_port": "analog-output-speaker", "properties": {}});
+        let jack = serde_json::json!({"name": "alsa_output.pci", "active_port": "analog-output-headphones", "properties": {}});
+        let bt = serde_json::json!({"name": "bluez_output.x", "active_port": null, "properties": {"device.form_factor": "headset", "device.icon_name": "audio-headset-bluetooth"}});
+        assert!(!sink_is_headphones(&speaker, &hints));
+        assert!(sink_is_headphones(&jack, &hints));
+        assert!(sink_is_headphones(&bt, &hints));
     }
 }

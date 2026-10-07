@@ -24,6 +24,7 @@ maono - control a Maono PD100W from the terminal, a status bar or the Omarchy pa
     maono profile list | apply <id> | save <name> | rename <id> <name> | duplicate <id> | delete <id>
     maono source clean | raw    default PipeWire input
     maono mute | unmute | toggle | gain [n|+n|-n] | nr off|low|mid|high | light on|off|next|<colour>
+    maono monitor on [clean|raw] [--force] | off   hear the mic live in the default output
     maono schema                every setting, range and option as JSON
     maono get <id> | scan [lo] [hi]   read raw fields (read-only)
     maono shell install | uninstall   the Omarchy bar widget

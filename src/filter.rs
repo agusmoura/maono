@@ -122,12 +122,21 @@ pub struct BypassMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MonitorMeta {
+    pub node: String,
+    pub latency_ms: u32,
+    pub headphone_hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FilterSchema {
     pub source: SourceMeta,
     pub fields: Vec<FilterField>,
     pub defaults: FilterState,
     pub band_labels: BTreeMap<String, String>,
     pub bypass: BypassMeta,
+    pub monitor: MonitorMeta,
     pub plugins: Plugins,
 }
 

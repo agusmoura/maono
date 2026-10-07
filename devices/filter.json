@@ -35,6 +35,7 @@
   },
   "bandLabels": {"peak": "bq_peaking", "lowshelf": "bq_lowshelf", "highshelf": "bq_highshelf"},
   "bypass": {"hpfFreq": 5, "lpfFreq": 22000, "passQ": 0.707},
+  "monitor": {"node": "maono-monitor", "latencyMs": 20, "headphoneHints": ["headphone", "headset", "earphone"]},
   "plugins": {
     "rnnoise": {
       "package": "noise-suppression-for-voice", "file": "librnnoise_ladspa.so", "plugin": "librnnoise_ladspa", "label": "noise_suppressor_mono",

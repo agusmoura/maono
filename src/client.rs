@@ -42,6 +42,14 @@ pub fn to_request(a: &[&str]) -> Result<Value, String> {
             let o = opts.iter().find(|o| o.label == format!("nr.{level}")).ok_or_else(|| format!("nr takes off, {}", opts.iter().map(|o| o.label.trim_start_matches("nr.")).collect::<Vec<_>>().join(", ")))?;
             json!({"cmd": "set", "changes": {"mic.nr.on": true, "mic.nr.level": o.value}})
         }
+        ["monitor", "off"] => json!({"cmd": "monitor.set", "on": false}),
+        ["monitor", "on", rest @ ..] => {
+            let mut req = json!({"cmd": "monitor.set", "on": true, "force": rest.contains(&"--force")});
+            if let Some(src) = rest.iter().find(|a| matches!(**a, "clean" | "raw")) {
+                req["source"] = json!(src);
+            }
+            req
+        }
         ["light", "on"] => json!({"cmd": "set", "changes": {"light.on": true}}),
         ["light", "off"] => json!({"cmd": "set", "changes": {"light.on": false}}),
         // Numeric mode, as the pre-plan-2 bar widget still sends (shell/Panel.qml:157).
@@ -108,7 +116,7 @@ pub fn request(req: Value) -> Result<Value, String> {
     if lock.try_lock().is_err() {
         return Err("maono serve is running but its socket does not answer".into());
     }
-    let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System { schema: FilterSchema::load() });
+    let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System::new(FilterSchema::load()));
     core.owner = false; // one-shot: reads write nothing; only filter/profile/source commands touch PipeWire
     core.filterctl.adopt(&core.filter.clone());
     if let Some(f) = device::find().first() {
@@ -145,6 +153,9 @@ mod tests {
         assert_eq!(to_request(&["light", "4"]).unwrap(), json!({"cmd": "set", "changes": {"light.on": true, "light.color": {"preset": "green"}}}));
         assert!(to_request(&["light", "8"]).is_err());
         assert!(to_request(&["set", "nonsense"]).is_err());
+        assert_eq!(to_request(&["monitor", "on", "raw", "--force"]).unwrap(), json!({"cmd": "monitor.set", "on": true, "source": "raw", "force": true}));
+        assert_eq!(to_request(&["monitor", "on"]).unwrap(), json!({"cmd": "monitor.set", "on": true, "force": false}));
+        assert_eq!(to_request(&["monitor", "off"]).unwrap(), json!({"cmd": "monitor.set", "on": false}));
     }
 
     #[test]
