@@ -8,6 +8,7 @@ pub mod device;
 pub mod mic;
 pub mod proto;
 pub mod safety;
+pub mod state;
 #[cfg(test)]
 mod fake;
 #[cfg(test)]
