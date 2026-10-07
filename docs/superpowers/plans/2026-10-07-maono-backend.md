@@ -30,6 +30,7 @@
 - The filter conf is rewritten on every accepted change (atomic, no restart) instead of after a 1 s debounce; the panel already debounces sliders at 120 ms.
 - `filter.bypass` is not a separate command: `filter.set {"enabled": false}` / `{"eq.on": false}` / `{"rnnoise.on": false}` / `{"comp.on": false}`.
 - The HID level meter is switched off on connect (0x0045 = 1); the panel meters PipeWire instead (spec rev 2, item 14).
+- Requests name a profile with `"profile"` (and a preset with `"preset"`), because `id` is the request id; the spec's examples reused `id`.
 
 ## Review Focus
 
