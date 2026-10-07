@@ -91,8 +91,12 @@ impl<A: Audio> FilterCtl<A> {
                 let _ = fs::remove_file(&self.conf_path);
             }
         }
-        let _ = self.audio.restart();
         self.applied = None;
+        if let Err(e) = self.audio.restart() {
+            return Err(format!(
+                "the filter did not come up with the new settings; the previous configuration was restored, but restarting filter-chain failed: {e}"
+            ));
+        }
         Err("the filter did not come up with the new settings; the previous configuration was restored".into())
     }
 
@@ -168,6 +172,23 @@ mod tests {
         assert!(c.apply(&next).is_err());
         assert_eq!(fs::read_to_string(dir.join("pw/maono-clean.conf")).unwrap(), before);
         assert_eq!(c.audio.restarts, 3); // the failed one + the restore
+        assert!(!c.is_applied());
+    }
+
+    #[test]
+    fn failed_rollback_restart_is_reported() {
+        let dir = tempdir("fctl");
+        let mut c = ctl(&dir);
+        let s = c.schema.defaults.clone();
+        c.apply(&s).unwrap();
+        let before = fs::read_to_string(dir.join("pw/maono-clean.conf")).unwrap();
+        let mut next = s.clone();
+        next.eq.bands[0].kind = "highshelf".into();
+        c.audio.broken = true;
+        c.audio.fail_restart_after = Some(2);
+        let err = c.apply(&next).unwrap_err();
+        assert!(err.contains("restarting filter-chain failed"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("pw/maono-clean.conf")).unwrap(), before);
         assert!(!c.is_applied());
     }
 

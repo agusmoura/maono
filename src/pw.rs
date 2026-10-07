@@ -146,6 +146,8 @@ pub mod fake {
         pub live_sets: u32,
         pub broken: bool,
         pub default: Option<String>,
+        /// restart() returns Err once `restarts` exceeds this value.
+        pub fail_restart_after: Option<u32>,
         conf: PathBuf,
     }
 
@@ -159,6 +161,7 @@ pub mod fake {
                 live_sets: 0,
                 broken: false,
                 default: None,
+                fail_restart_after: None,
                 conf: conf.to_path_buf(),
             }
         }
@@ -201,6 +204,9 @@ pub mod fake {
         }
         fn restart(&mut self) -> io::Result<()> {
             self.restarts += 1;
+            if self.fail_restart_after.is_some_and(|n| self.restarts > n) {
+                return Err(io::Error::other("systemctl restart failed"));
+            }
             self.node = if self.broken { None } else { std::fs::read_to_string(&self.conf).ok().map(|c| parse_controls(&c)) };
             Ok(())
         }
