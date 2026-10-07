@@ -645,6 +645,10 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub fn run() -> io::Result<()> {
+    let lock = std::fs::File::create(maono::store::lock_path())?;
+    if lock.try_lock().is_err() {
+        return Err(std::io::Error::other("`maono serve` owns the mic (the Omarchy panel); use the panel or stop serve first"));
+    }
     let mut app = App::new(Mic::open()?)?;
     let mut term = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture)?;
