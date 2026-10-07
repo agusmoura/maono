@@ -10,6 +10,7 @@ pub mod filter;
 pub mod filterctl;
 pub mod mic;
 pub mod proto;
+pub mod profiles;
 pub mod pw;
 pub mod safety;
 pub mod state;

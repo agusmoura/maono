@@ -1,0 +1,15 @@
+[
+  {"version": 1, "id": "llamada", "name": "Llamada",
+   "mic": {"mic.gain": 20, "mic.nr.on": true, "mic.nr.level": 0},
+   "filter": {"enabled": true, "eq.preset": "original", "eq.on": true, "hpf.on": true, "hpf.freq": 90, "rnnoise.on": true, "rnnoise.vad": 85, "comp.on": true, "comp.threshold": -24, "comp.ratio": 3}},
+  {"version": 1, "id": "streaming", "name": "Streaming / Discord",
+   "mic": {"mic.gain": 20, "mic.nr.on": true, "mic.nr.level": 0},
+   "light": {"light.on": true, "light.effect": 0, "light.brightness": 40, "light.color": "theme"},
+   "filter": {"enabled": true, "eq.preset": "stream1", "eq.on": true, "hpf.on": true, "hpf.freq": 90, "rnnoise.on": true, "rnnoise.vad": 80, "comp.on": true, "comp.threshold": -20, "comp.ratio": 4}},
+  {"version": 1, "id": "grabacion", "name": "Grabación",
+   "mic": {"mic.gain": 18, "mic.nr.on": false},
+   "filter": {"enabled": true, "eq.preset": "original", "eq.on": true, "hpf.on": true, "hpf.freq": 70, "rnnoise.on": true, "rnnoise.vad": 0, "comp.on": false}},
+  {"version": 1, "id": "gaming", "name": "Gaming",
+   "mic": {"mic.gain": 20, "mic.nr.on": true, "mic.nr.level": 1},
+   "filter": {"enabled": true, "eq.preset": "game1", "eq.on": true, "hpf.on": true, "hpf.freq": 100, "rnnoise.on": true, "rnnoise.vad": 92, "comp.on": true, "comp.threshold": -20, "comp.ratio": 4}}
+]
