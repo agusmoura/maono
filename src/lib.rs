@@ -5,3 +5,4 @@
 
 pub mod mic;
 pub mod proto;
+pub mod safety;

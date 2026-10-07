@@ -22,13 +22,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use crate::proto::{self, Frame};
+
 /// USB ids as they appear in a hidraw uevent's `HID_ID`: the wireless
 /// receiver (0414) and the mic itself plugged in by cable (0417).
 const HID_MATCH: [&str; 2] = ["352F:0414", "352F:0417"];
-
-const SET: u8 = 0x03; // host -> device, and what the device uses to notify
-const GET: u8 = 0x04; // host -> device, device answers with the same type
-const REPORT_LEN: usize = 64;
 
 pub const BATTERY: u16 = 0x0042; // percent
 pub const LEVEL: u16 = 0x0044; // input meter, streamed ~10x/sec
@@ -101,61 +99,6 @@ pub fn find_device() -> Option<String> {
     None
 }
 
-fn checksum(bytes: &[u8]) -> u16 {
-    let sum: u32 = bytes.iter().map(|&b| b as u32).sum();
-    (0x1_0000u32.wrapping_sub(sum) & 0xFFFF) as u16
-}
-
-fn build(msg_type: u8, id: u16, val: u16) -> [u8; REPORT_LEN] {
-    let mut f = [0u8; REPORT_LEN];
-    f[..9].copy_from_slice(&[
-        0xC4,
-        0x0B,
-        0x00,
-        0x00,
-        msg_type,
-        id as u8,
-        (id >> 8) as u8,
-        val as u8,
-        (val >> 8) as u8,
-    ]);
-    let ck = checksum(&f[..9]);
-    f[9] = ck as u8;
-    f[10] = (ck >> 8) as u8;
-    f
-}
-
-/// Decode one report into its message type and `(id, value)` pairs.
-/// Returns `None` when the frame is malformed or fails its checksum.
-fn parse(buf: &[u8]) -> Option<(u8, Vec<(u16, u16)>)> {
-    if buf.len() < 7 || buf[0] != 0xC4 {
-        return None;
-    }
-    let len = buf[1] as usize;
-    if !(7..=buf.len()).contains(&len) {
-        return None;
-    }
-    let frame = &buf[..len];
-    let got = u16::from_le_bytes([frame[len - 2], frame[len - 1]]);
-    if got != checksum(&frame[..len - 2]) {
-        return None;
-    }
-    let body = &frame[5..len - 2];
-    if body.len() % 4 != 0 {
-        return None;
-    }
-    let fields = body
-        .chunks_exact(4)
-        .map(|c| {
-            (
-                u16::from_le_bytes([c[0], c[1]]),
-                u16::from_le_bytes([c[2], c[3]]),
-            )
-        })
-        .collect();
-    Some((frame[4], fields))
-}
-
 pub struct Mic {
     file: File,
 }
@@ -183,23 +126,21 @@ impl Mic {
         Ok(Self { file })
     }
 
-    fn send(&mut self, msg_type: u8, id: u16, val: u16) -> io::Result<()> {
-        self.file.write_all(&build(msg_type, id, val))
-    }
-
-    /// Read one report, or `None` if nothing is waiting.
-    fn try_read(&mut self) -> Option<(u8, Vec<(u16, u16)>)> {
+    /// Every frame in the next waiting report; empty when nothing is waiting.
+    fn try_read(&mut self) -> Vec<Frame> {
         let mut buf = [0u8; 512];
         match self.file.read(&mut buf) {
-            Ok(n) if n > 0 => parse(&buf[..n]),
-            _ => None,
+            Ok(n) if n > 0 => proto::decode(&buf[..n]),
+            _ => Vec::new(),
         }
     }
 
-    /// Write a field. The device does not acknowledge, so callers that care
-    /// should read the value back.
+    /// Write a field. Refused (InvalidInput) unless `safety` allows the value.
+    /// The device does not acknowledge, so callers that care read it back.
     pub fn set(&mut self, id: u16, val: u16) -> io::Result<()> {
-        self.send(SET, id, val)
+        let val = crate::safety::check(id, val as i64)
+            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e.to_string()))?;
+        self.file.write_all(&proto::set(&[(id, val)]))
     }
 
     /// Query one field, ignoring the level-meter notifications streaming past.
@@ -208,17 +149,22 @@ impl Mic {
     }
 
     fn get_within(&mut self, id: u16, timeout: Duration) -> io::Result<Option<u16>> {
-        self.send(GET, id, 0)?;
+        self.file.write_all(&proto::get(id))?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            match self.try_read() {
-                Some((msg_type, fields)) if msg_type == GET => {
-                    if let Some((_, v)) = fields.into_iter().find(|(f, _)| *f == id) {
-                        return Ok(Some(v));
-                    }
-                }
-                Some(_) => continue,
-                None => sleep(Duration::from_millis(2)),
+            let frames = self.try_read();
+            if frames.is_empty() {
+                sleep(Duration::from_millis(2));
+                continue;
+            }
+            let hit = frames
+                .iter()
+                .filter(|f| f.kind == proto::GET)
+                .flat_map(|f| &f.fields)
+                .find(|(f, _)| *f == id)
+                .map(|&(_, v)| v);
+            if hit.is_some() {
+                return Ok(hit);
             }
         }
         Ok(None)
@@ -241,10 +187,13 @@ impl Mic {
     /// the level meter and to notice the physical buttons being pressed.
     pub fn drain(&mut self) -> Vec<(u16, u16)> {
         let mut out = Vec::new();
-        while let Some((_, fields)) = self.try_read() {
-            out.extend(fields);
+        loop {
+            let frames = self.try_read();
+            if frames.is_empty() {
+                return out;
+            }
+            out.extend(frames.into_iter().flat_map(|f| f.fields));
         }
-        out
     }
 }
 
