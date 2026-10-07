@@ -69,7 +69,7 @@ fn read_color(dev: &mut Device, desc: &Descriptor, other: &mut dyn FnMut(&Frame)
         Some(i) => custom
             .get((i - 8) as usize)
             .filter(|c| !c.is_null())
-            .map_or(json!({"slot": i - 8}), |c| json!({"hsv": c})),
+            .map_or(Value::Null, |c| json!({"hsv": c})),
     };
     Ok((color, Value::Array(custom)))
 }
@@ -194,9 +194,15 @@ pub fn custom_delete(dev: &mut Device, desc: &Descriptor, current: &Values, inde
     if index >= custom.len() {
         return Err(ApplyError::Invalid(vec![format!("light.custom: no colour at {index}")]));
     }
-    let mut pairs = Vec::new();
+    let mut shifted = Vec::new();
     for (k, c) in custom.iter().enumerate().skip(index + 1) {
-        let raw = hsv_raw(Some(c)).unwrap_or([0, 0, 0]);
+        match hsv_raw(Some(c)) {
+            Some(raw) => shifted.push((k, raw)),
+            None => return Err(ApplyError::Invalid(vec![format!("light.custom: colour {k} could not be read; refresh and retry")])),
+        }
+    }
+    let mut pairs = Vec::new();
+    for (k, raw) in shifted {
         let b = l.base + 3 * (k as u16 - 1);
         pairs.extend([(b, raw[0]), (b + 1, raw[1]), (b + 2, raw[2])]);
     }
@@ -295,6 +301,26 @@ mod tests {
         assert_eq!(fake.reg(0x208E), Some(1));
         assert_eq!(fake.reg(0x208C), Some(8));
         assert_eq!(eff["light.custom"], json!([[20.0, 0.5, 0.5]]));
+    }
+
+    #[test]
+    fn delete_refuses_and_writes_nothing_when_a_later_slot_is_unreadable() {
+        let d = Descriptor::load();
+        let (mut dev, fake) = FakeMic::new(&pd100w_regs());
+        let cur = values(json!({"light.custom": [[10, 1, 1], null]}));
+        let r = custom_delete(&mut dev, &d, &cur, 0, &mut |_| {});
+        assert!(matches!(r, Err(ApplyError::Invalid(_))), "{r:?}");
+        assert!(fake.writes().is_empty());
+    }
+
+    #[test]
+    fn colour_index_pointing_at_an_unreadable_slot_reads_as_null() {
+        let d = Descriptor::load();
+        let mut regs = pd100w_regs();
+        regs.extend([(0x208C, 9), (0x208E, 0)]);
+        let (mut dev, _fake) = FakeMic::new(&regs);
+        let v = read_all(&mut dev, &d, &mut |_| {}).unwrap();
+        assert_eq!(v["light.color"], Value::Null);
     }
 
     #[test]
