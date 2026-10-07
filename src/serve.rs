@@ -32,6 +32,7 @@ pub fn run<A: Audio>(
     open: &mut dyn FnMut() -> Opened,
     tick: Duration,
     probe_every: Duration,
+    unsupported_retry: Duration,
 ) -> io::Result<()> {
     core.start_filter();
     core.hello();
@@ -42,13 +43,15 @@ pub fn run<A: Audio>(
             match open() {
                 Opened::Device(d) => {
                     core.connect(d, was_connected);
-                    was_connected = true;
+                    was_connected |= core.link == Link::Connected;
                 }
                 Opened::Permission if core.link != Link::Permission => core.disconnect(Link::Permission),
                 Opened::None if core.link != Link::Disconnected => core.disconnect(Link::Disconnected),
                 _ => {}
             }
-            next_probe = Instant::now() + probe_every;
+            // ponytail: fixed backoff per link state, not adaptive across many
+            // unsupported devices at once; fine for one stray USB receiver.
+            next_probe = Instant::now() + if core.link == Link::Unsupported { unsupported_retry } else { probe_every };
         }
         flush(core, out, None)?;
         match inputs.recv_timeout(tick) {
@@ -149,7 +152,7 @@ pub fn main() -> io::Result<()> {
     let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System { schema: FilterSchema::load() });
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let r = run(&mut core, rx, &mut out, &mut open_device, Duration::from_millis(50), Duration::from_secs(1));
+    let r = run(&mut core, rx, &mut out, &mut open_device, Duration::from_millis(50), Duration::from_secs(1), Duration::from_secs(30));
     let _ = fs::remove_file(&sock);
     drop(lock);
     r
@@ -185,7 +188,7 @@ mod tests {
         let (dev, fake) = FakeMic::new(&pd100w_regs());
         let mut devs = vec![Opened::Device(dev)];
         let mut out = Vec::new();
-        run(&mut c, rx, &mut out, &mut || devs.pop().unwrap_or(Opened::None), Duration::from_millis(5), Duration::ZERO).unwrap();
+        run(&mut c, rx, &mut out, &mut || devs.pop().unwrap_or(Opened::None), Duration::from_millis(5), Duration::ZERO, Duration::ZERO).unwrap();
         let ev = lines(&out);
         assert_eq!(ev[0]["ev"], "hello");
         assert!(ev.iter().any(|e| e["ev"] == "ack" && e["id"] == 1 && e["ok"] == true));
@@ -199,7 +202,7 @@ mod tests {
         tx.send(Input::Line(r#"{"id":7,"cmd":"status"}"#.into(), None)).unwrap();
         tx.send(Input::Eof).unwrap();
         let mut out = Vec::new();
-        run(&mut c, rx, &mut out, &mut || Opened::Permission, Duration::from_millis(5), Duration::ZERO).unwrap();
+        run(&mut c, rx, &mut out, &mut || Opened::Permission, Duration::from_millis(5), Duration::ZERO, Duration::ZERO).unwrap();
         let ev = lines(&out);
         assert!(ev.iter().any(|e| e["ev"] == "state" && e["device"] == "permission"));
         assert!(ev.iter().any(|e| e["ev"] == "ack" && e["id"] == 7));
@@ -217,7 +220,7 @@ mod tests {
         let (dev, fake) = FakeMic::new(&pd100w_regs());
         let mut devs = vec![Opened::Device(dev)];
         let mut out = Vec::new();
-        run(&mut c, rx, &mut out, &mut || devs.pop().unwrap_or(Opened::None), Duration::from_millis(5), Duration::ZERO).unwrap();
+        run(&mut c, rx, &mut out, &mut || devs.pop().unwrap_or(Opened::None), Duration::from_millis(5), Duration::ZERO, Duration::ZERO).unwrap();
         let a: Vec<Value> = a_rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
         let b: Vec<Value> = b_rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
         assert!(a.iter().any(|e| e["ev"] == "ack" && e["id"] == "a"));
@@ -225,5 +228,23 @@ mod tests {
         assert!(!a.iter().any(|e| e["id"] == "b"));
         // serde_json maps are key-sorted: light.brightness goes out before mic.gain
         assert_eq!(fake.writes(), vec![(0x208A, 50), (0x207E, 5), (0x207E, 9)]);
+    }
+
+    #[test]
+    fn failed_connect_does_not_count_as_connected() {
+        let mut c = core();
+        c.config.active_profile = Some("grabacion".into());
+        let (tx, rx) = mpsc::channel();
+        tx.send(Input::Line(r#"{"id":1,"cmd":"status"}"#.into(), None)).unwrap();
+        tx.send(Input::Eof).unwrap();
+        let mut regs_bad = pd100w_regs();
+        regs_bad.push((0x0017, 0x0999));
+        let (dev_bad, fake_bad) = FakeMic::new(&regs_bad);
+        let (dev_good, fake_good) = FakeMic::new(&pd100w_regs());
+        let mut devs = vec![Opened::Device(dev_good), Opened::Device(dev_bad)];
+        let mut out = Vec::new();
+        run(&mut c, rx, &mut out, &mut || devs.pop().unwrap_or(Opened::None), Duration::from_millis(5), Duration::ZERO, Duration::ZERO).unwrap();
+        assert!(fake_bad.writes().is_empty(), "the unsupported device is never written to");
+        assert!(fake_good.writes().is_empty(), "the good device was a first connect, not a reconnect: no profile reapply");
     }
 }
