@@ -14,6 +14,7 @@ pub mod proto;
 pub mod profiles;
 pub mod pw;
 pub mod safety;
+pub mod serve;
 pub mod state;
 pub mod store;
 #[cfg(test)]
