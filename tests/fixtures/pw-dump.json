@@ -1,0 +1,11 @@
+[
+  {"id": 70, "type": "PipeWire:Interface:Device", "info": {"props": {"device.vendor.id": "0x352f", "device.product.id": "0x0414", "device.name": "alsa_card.rx"}}},
+  {"id": 71, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Source", "device.id": 70, "node.name": "alsa_input.usb-rx.mono-fallback"}}},
+  {"id": 61, "type": "PipeWire:Interface:Device", "info": {"props": {"device.vendor.id": "0x352f", "device.product.id": "0x0417", "device.name": "alsa_card.usb-Maono"}}},
+  {"id": 62, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Sink", "device.id": 61, "node.name": "alsa_output.usb-Maono.analog-stereo"}}},
+  {"id": 63, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Source", "device.id": 61, "node.name": "alsa_input.usb-Maono.mono-fallback"}}},
+  {"id": 82, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "maono_clean_in"}, "params": {"Props": [
+    {"params": ["monitor.channel-volumes", false]},
+    {"params": ["hp1:Freq", 90.0, "hp1:Q", 0.707, "rnnoise:VAD Threshold (%)", 85, "comp:Bypass", true]}
+  ]}}}
+]
