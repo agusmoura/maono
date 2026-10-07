@@ -1,0 +1,56 @@
+{
+  "device": "Maono PD100W",
+  "fields": [
+    {"key": "mic.mute", "id": "0x207D", "type": "bool", "group": "voice", "status": "verified"},
+    {"key": "mic.gain", "id": "0x207E", "type": "int", "min": 0, "max": 20, "step": 1, "group": "voice", "status": "verified", "profile": true},
+    {"key": "mic.nr.on", "id": "0x2084", "type": "bool", "group": "voice", "status": "verified", "profile": true},
+    {"key": "mic.nr.level", "id": "0x2085", "type": "enum", "options": [{"value": 0, "label": "nr.low"}, {"value": 1, "label": "nr.mid"}, {"value": 2, "label": "nr.high"}], "group": "voice", "status": "verified", "profile": true},
+    {"key": "headphones.volume", "id": "0x207F", "type": "int", "min": 0, "max": 20, "step": 1, "group": "headphones", "status": "experimental", "profile": true},
+    {"key": "headphones.monitor", "id": "0x20AF", "type": "enum", "options": [{"value": 0, "label": "monitor.none"}, {"value": 1, "label": "monitor.voice"}, {"value": 2, "label": "monitor.pc"}, {"value": 4, "label": "monitor.both"}, {"value": 7, "label": "monitor.all"}], "group": "headphones", "status": "experimental", "profile": true},
+    {"key": "light.on", "id": "0x2089", "type": "bool", "group": "light", "status": "verified", "profile": true},
+    {"key": "light.brightness", "id": "0x208A", "type": "int", "min": 1, "max": 100, "step": 1, "unit": "%", "group": "light", "status": "verified", "profile": true},
+    {"key": "light.effect", "id": "0x208B", "type": "enum", "options": [{"value": 0, "label": "effect.fixed"}, {"value": 1, "label": "effect.breathe"}, {"value": 2, "label": "effect.cycle"}], "group": "light", "status": "verified", "profile": true},
+    {"key": "dsp.comp.on", "id": "0x2069", "type": "bool", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.comp.threshold", "id": "0x206A", "type": "int", "min": -48, "max": 0, "step": 1, "unit": "dB", "encoding": "db10_2000", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.comp.attack", "id": "0x206B", "type": "int", "min": 0, "max": 400, "step": 1, "unit": "ms", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.comp.release", "id": "0x206C", "type": "int", "min": 0, "max": 2000, "step": 1, "unit": "ms", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.comp.ratio", "id": "0x206D", "type": "int", "min": 1, "max": 12, "step": 1, "group": "dsp", "status": "experimental"},
+    {"key": "dsp.limiter.on", "id": "0x206E", "type": "bool", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.limiter.threshold", "id": "0x206F", "type": "int", "min": -48, "max": 0, "step": 1, "unit": "dB", "encoding": "db10_2000", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.limiter.attack", "id": "0x2070", "type": "int", "min": 5, "max": 400, "step": 1, "unit": "ms", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.limiter.release", "id": "0x2071", "type": "int", "min": 5, "max": 2000, "step": 1, "unit": "ms", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.reverb.on", "id": "0x2082", "type": "bool", "group": "dsp", "status": "experimental"},
+    {"key": "dsp.reverb.level", "id": "0x2083", "type": "int", "min": 0, "max": 9, "step": 1, "group": "dsp", "status": "experimental"}
+  ],
+  "eqSlots": {
+    "keyPrefix": "dsp.eq", "base": "0x2023", "count": 7, "status": "experimental",
+    "fields": [
+      {"name": "enable", "type": "bool"},
+      {"name": "type", "type": "enum", "options": [{"value": 1, "label": "eq.peak"}, {"value": 0, "label": "eq.lowshelf"}, {"value": 2, "label": "eq.highshelf"}, {"value": 3, "label": "eq.lowpass"}, {"value": 5, "label": "eq.highpass"}]},
+      {"name": "freq", "type": "int", "min": 20, "max": 20000, "step": 1, "unit": "Hz"},
+      {"name": "gain", "type": "num", "min": -12, "max": 12, "step": 0.1, "unit": "dB", "encoding": "db10_2000"},
+      {"name": "q", "type": "num", "min": 0.1, "max": 20, "step": 0.01, "encoding": "x100"}
+    ]
+  },
+  "readonly": [
+    {"key": "info.battery", "id": "0x0042", "type": "int", "mask": "low", "unit": "%", "group": "info", "status": "verified"},
+    {"key": "info.charging", "id": "0x0049", "type": "bool", "mask": "low", "group": "info", "status": "verified"},
+    {"key": "info.firmware", "id": "0x000B", "type": "version", "group": "info", "status": "verified"}
+  ],
+  "serial": {"start": "0x001E", "count": 16},
+  "meter": {"id": "0x0045", "off": 1},
+  "identity": {"vendorId": "0x0016", "productId": "0x0017", "vendor": "0x352F", "products": ["0x0417", "0x0414"]},
+  "light": {
+    "color": "0x208C", "count": "0x208E", "base": "0x208F", "customMax": 5,
+    "presets": [
+      {"value": 0, "name": "white", "hex": "#FFFFFF"},
+      {"value": 1, "name": "red", "hex": "#FF0000"},
+      {"value": 2, "name": "orange", "hex": "#FFA500"},
+      {"value": 3, "name": "yellow", "hex": "#FFFF00"},
+      {"value": 4, "name": "green", "hex": "#00FF00"},
+      {"value": 5, "name": "cyan", "hex": "#00FFFF"},
+      {"value": 6, "name": "blue", "hex": "#0000FF"},
+      {"value": 7, "name": "magenta", "hex": "#FF00FF"}
+    ]
+  }
+}

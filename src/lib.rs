@@ -3,6 +3,7 @@
 //! The protocol lives here so both frontends - the CLI and the TUI - drive the
 //! device through exactly one implementation.
 
+pub mod descriptor;
 pub mod mic;
 pub mod proto;
 pub mod safety;
