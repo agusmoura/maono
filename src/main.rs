@@ -103,8 +103,12 @@ fn main() -> ExitCode {
             }
             ["scan", rest @ ..] => scan(rest),
             ["status", "--json"] => {
-                println!("{}", legacy_status_json(&state()?));
-                Ok(())
+                let s = state()?;
+                println!("{}", legacy_status_json(&s));
+                // Compat for the pre-plan-2 bar widget: it reads this JSON line but
+                // detects "receiver not found" from the exit code, not from the
+                // JSON's "device" field (plan 2 rewrites the widget and drops this).
+                if s["device"] == "connected" { Ok(()) } else { Err(ExitCode::from(1)) }
             }
             ["status"] => {
                 let s = state()?;

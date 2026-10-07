@@ -44,6 +44,13 @@ pub fn to_request(a: &[&str]) -> Result<Value, String> {
         }
         ["light", "on"] => json!({"cmd": "set", "changes": {"light.on": true}}),
         ["light", "off"] => json!({"cmd": "set", "changes": {"light.on": false}}),
+        // Numeric mode, as the pre-plan-2 bar widget still sends (shell/Panel.qml:157).
+        ["light", name] if *name != "next" && name.parse::<i64>().is_ok() => {
+            let n = name.parse::<i64>().unwrap();
+            let preset = desc.light.presets.iter().find(|p| p.value as i64 == n)
+                .ok_or_else(|| format!("light takes 0-{} or a colour name", desc.light.presets.len().saturating_sub(1)))?;
+            json!({"cmd": "set", "changes": {"light.on": true, "light.color": {"preset": preset.name}}})
+        }
         ["light", name] if *name != "next" => {
             let names: Vec<&str> = desc.light.presets.iter().map(|p| p.name.as_str()).collect();
             if !names.contains(name) {
@@ -134,6 +141,9 @@ mod tests {
         assert_eq!(to_request(&["nr", "high"]).unwrap()["changes"], json!({"mic.nr.on": true, "mic.nr.level": 2}));
         assert_eq!(to_request(&["nr", "off"]).unwrap()["changes"], json!({"mic.nr.on": false}));
         assert_eq!(to_request(&["light", "purple"]).unwrap_err(), "unknown colour purple (white, red, orange, yellow, green, cyan, blue, magenta)");
+        // Numeric light mode: what the pre-plan-2 bar widget still sends.
+        assert_eq!(to_request(&["light", "4"]).unwrap(), json!({"cmd": "set", "changes": {"light.on": true, "light.color": {"preset": "green"}}}));
+        assert!(to_request(&["light", "8"]).is_err());
         assert!(to_request(&["set", "nonsense"]).is_err());
     }
 
