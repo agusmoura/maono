@@ -1,0 +1,30 @@
+[
+  {"id": "original", "name": "Original", "source": "maono", "hpf": 20, "lpf": 20000, "bands": [
+    {"type": "peak", "freq": 125, "gain": 0, "q": 1}, {"type": "peak", "freq": 250, "gain": 0, "q": 1},
+    {"type": "peak", "freq": 500, "gain": 0, "q": 1}, {"type": "peak", "freq": 1000, "gain": 0, "q": 1},
+    {"type": "peak", "freq": 2000, "gain": 0, "q": 1}]},
+  {"id": "game1", "name": "Game 1", "source": "maono", "hpf": 39.6, "lpf": 10015.6, "bands": [
+    {"type": "peak", "freq": 180, "gain": 1, "q": 0.7}, {"type": "peak", "freq": 50, "gain": -10, "q": 1},
+    {"type": "peak", "freq": 1500, "gain": 3, "q": 0.7}, {"type": "peak", "freq": 5009, "gain": 0, "q": 3},
+    {"type": "highshelf", "freq": 12000, "gain": -10, "q": 0.8}]},
+  {"id": "game2", "name": "Game 2", "source": "maono", "hpf": 48.65, "lpf": 10015.6, "bands": [
+    {"type": "lowshelf", "freq": 136, "gain": 8.571, "q": 0.7}, {"type": "peak", "freq": 40, "gain": -10, "q": 1},
+    {"type": "peak", "freq": 1200, "gain": 2, "q": 0.7}, {"type": "peak", "freq": 5009, "gain": 0, "q": 3},
+    {"type": "highshelf", "freq": 12000, "gain": -10, "q": 0.8}]},
+  {"id": "stream1", "name": "Stream 1", "source": "maono", "hpf": 59.23, "lpf": 16822.2, "bands": [
+    {"type": "lowshelf", "freq": 52.4, "gain": -12, "q": 1}, {"type": "peak", "freq": 1350, "gain": 3, "q": 0.5},
+    {"type": "peak", "freq": 5000, "gain": 2, "q": 0.8}, {"type": "peak", "freq": 8810, "gain": -1, "q": 1},
+    {"type": "highshelf", "freq": 10000, "gain": -1, "q": 0.7}]},
+  {"id": "stream2", "name": "Stream 2", "source": "maono", "hpf": 59.23, "lpf": 10919.7, "bands": [
+    {"type": "lowshelf", "freq": 50, "gain": -12, "q": 0.8}, {"type": "peak", "freq": 100, "gain": -2, "q": 1.5},
+    {"type": "peak", "freq": 800, "gain": 0, "q": 0.5}, {"type": "peak", "freq": 1500, "gain": 3, "q": 0.8},
+    {"type": "highshelf", "freq": 4500, "gain": 3, "q": 0.8}]},
+  {"id": "pop", "name": "Pop", "source": "maono", "hpf": 63.27, "lpf": null, "bands": [
+    {"type": "peak", "freq": 199, "gain": -2, "q": 1}, {"type": "peak", "freq": 500, "gain": 0, "q": 1},
+    {"type": "peak", "freq": 1000, "gain": 0, "q": 1}, {"type": "peak", "freq": 7010, "gain": -3, "q": 8},
+    {"type": "highshelf", "freq": 11000, "gain": 1, "q": 0.7}]},
+  {"id": "folk", "name": "Folk", "source": "maono", "hpf": 40.52, "lpf": 11303.8, "bands": [
+    {"type": "peak", "freq": 40, "gain": -10, "q": 1.5}, {"type": "peak", "freq": 3150, "gain": -2, "q": 5},
+    {"type": "peak", "freq": 500, "gain": 0, "q": 1}, {"type": "peak", "freq": 5700, "gain": -4.32, "q": 5},
+    {"type": "highshelf", "freq": 8810, "gain": -3, "q": 0.5}]}
+]

@@ -6,6 +6,7 @@
 pub mod config;
 pub mod descriptor;
 pub mod device;
+pub mod filter;
 pub mod mic;
 pub mod proto;
 pub mod safety;

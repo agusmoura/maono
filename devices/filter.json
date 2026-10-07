@@ -1,0 +1,52 @@
+{
+  "source": {"node": "maono_clean", "capture": "maono_clean_in", "description": "Maono PD100W (limpio)"},
+  "fields": [
+    {"key": "enabled", "type": "bool"},
+    {"key": "hpf.on", "type": "bool"},
+    {"key": "hpf.freq", "type": "num", "min": 10, "max": 400, "step": 1, "unit": "Hz"},
+    {"key": "eq.on", "type": "bool"},
+    {"key": "eq.bands.*.type", "type": "enum", "options": ["peak", "lowshelf", "highshelf"]},
+    {"key": "eq.bands.*.freq", "type": "num", "min": 20, "max": 20000, "step": 1, "unit": "Hz"},
+    {"key": "eq.bands.*.gain", "type": "num", "min": -24, "max": 24, "step": 0.1, "unit": "dB"},
+    {"key": "eq.bands.*.q", "type": "num", "min": 0.1, "max": 20, "step": 0.01},
+    {"key": "lpf.on", "type": "bool"},
+    {"key": "lpf.freq", "type": "num", "min": 1000, "max": 22000, "step": 10, "unit": "Hz"},
+    {"key": "rnnoise.on", "type": "bool"},
+    {"key": "rnnoise.vad", "type": "num", "min": 0, "max": 99, "step": 1, "unit": "%"},
+    {"key": "rnnoise.grace", "type": "num", "min": 0, "max": 1000, "step": 10, "unit": "ms"},
+    {"key": "rnnoise.retro", "type": "num", "min": 0, "max": 200, "step": 5, "unit": "ms"},
+    {"key": "comp.on", "type": "bool"},
+    {"key": "comp.threshold", "type": "num", "min": -60, "max": 0, "step": 1, "unit": "dB"},
+    {"key": "comp.ratio", "type": "num", "min": 1, "max": 20, "step": 0.1},
+    {"key": "comp.attack", "type": "num", "min": 0, "max": 500, "step": 1, "unit": "ms"},
+    {"key": "comp.release", "type": "num", "min": 10, "max": 2000, "step": 10, "unit": "ms"},
+    {"key": "comp.makeup", "type": "num", "min": 0, "max": 24, "step": 0.5, "unit": "dB"}
+  ],
+  "defaults": {
+    "version": 1, "enabled": true,
+    "hpf": {"on": true, "freq": 90},
+    "eq": {"on": true, "preset": "original", "bands": [
+      {"type": "peak", "freq": 125, "gain": 0, "q": 1}, {"type": "peak", "freq": 250, "gain": 0, "q": 1},
+      {"type": "peak", "freq": 500, "gain": 0, "q": 1}, {"type": "peak", "freq": 1000, "gain": 0, "q": 1},
+      {"type": "peak", "freq": 2000, "gain": 0, "q": 1}]},
+    "lpf": {"on": true, "freq": 20000},
+    "rnnoise": {"on": true, "vad": 85, "grace": 250, "retro": 30},
+    "comp": {"on": false, "threshold": -24, "ratio": 3, "attack": 10, "release": 150, "makeup": 0}
+  },
+  "bandLabels": {"peak": "bq_peaking", "lowshelf": "bq_lowshelf", "highshelf": "bq_highshelf"},
+  "bypass": {"hpfFreq": 5, "lpfFreq": 22000, "passQ": 0.707},
+  "plugins": {
+    "rnnoise": {
+      "package": "noise-suppression-for-voice", "file": "librnnoise_ladspa.so", "plugin": "librnnoise_ladspa", "label": "noise_suppressor_mono",
+      "in": "Input", "out": "Output",
+      "controls": {"vad": "VAD Threshold (%)", "grace": "VAD Grace Period (ms)", "retro": "Retroactive VAD Grace (ms)"},
+      "switch": {"port": "Dry Mix", "on": 0, "off": 1}
+    },
+    "comp": {
+      "package": "lsp-plugins-ladspa", "file": "lsp-plugins-ladspa.so", "plugin": "lsp-plugins-ladspa", "label": "http://lsp-plug.in/plugins/ladspa/compressor_mono",
+      "in": "Input", "out": "Output",
+      "controls": {"threshold": "Attack threshold (G)", "ratio": "Ratio", "attack": "Attack time (ms)", "release": "Release time (ms)", "makeup": "Makeup gain (G)"},
+      "switch": {"port": "Bypass", "on": 0, "off": 1}
+    }
+  }
+}
