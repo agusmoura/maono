@@ -16,17 +16,13 @@
 //! below come from the app and from watching the physical controls, never from
 //! probing the device.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::proto::{self, Frame};
-
-/// USB ids as they appear in a hidraw uevent's `HID_ID`: the wireless
-/// receiver (0414) and the mic itself plugged in by cable (0417).
-const HID_MATCH: [&str; 2] = ["352F:0414", "352F:0417"];
 
 pub const BATTERY: u16 = 0x0042; // percent
 pub const LEVEL: u16 = 0x0044; // input meter, streamed ~10x/sec
@@ -76,41 +72,17 @@ pub fn light_mode_name(mode: u16) -> &'static str {
     LIGHT_MODE_NAMES.get(mode as usize).copied().unwrap_or("?")
 }
 
-/// Locate the receiver's hidraw node. The number moves between replugs, so we
-/// match on the USB ids rather than assuming `hidraw0`.
-pub fn find_device() -> Option<String> {
-    let mut nodes: Vec<_> = fs::read_dir("/sys/class/hidraw")
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
-    nodes.sort();
-    for node in nodes {
-        let uevent = node.join("device/uevent");
-        if let Ok(text) = fs::read_to_string(&uevent) {
-            // HID_ID looks like 0003:0000352F:00000414
-            let id = text.to_uppercase().replace("0000", "");
-            if HID_MATCH.iter().any(|m| id.contains(m)) {
-                let name = node.file_name()?.to_str()?.to_string();
-                return Some(format!("/dev/{name}"));
-            }
-        }
-    }
-    None
-}
-
 pub struct Mic {
     file: File,
 }
 
 impl Mic {
     pub fn open() -> io::Result<Self> {
-        let path = find_device().ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::NotFound,
-                "Maono PD100W receiver not found - is it plugged in?",
-            )
-        })?;
+        let path = crate::device::find()
+            .into_iter()
+            .next()
+            .map(|f| f.hidraw.display().to_string())
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "Maono PD100W not found - is it plugged in?"))?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
