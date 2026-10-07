@@ -23,6 +23,7 @@ pub enum Link {
     Connected,
     Disconnected,
     Permission,
+    Unsupported,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +225,27 @@ impl<A: Audio> Core<A> {
         self.config.save(&self.dir).map_err(err)
     }
 
+    /// Profile-eligible descriptor fields read out of `from`, split into the
+    /// mic group (`light` false) or the light group (`light` true); the light
+    /// group also carries `light.color` when it names a preset or an hsv.
+    /// Shared by `save_profile` and the pre-reapply recovery snapshot in
+    /// `connect`, so both keep exactly the same set of keys.
+    fn profile_values(&self, from: &Values, light: bool) -> Values {
+        let mut v: Values = self
+            .desc
+            .fields
+            .iter()
+            .filter(|f| f.profile && f.key.starts_with("light.") == light)
+            .filter_map(|f| from.get(&f.key).filter(|v| !v.is_null()).map(|v| (f.key.clone(), v.clone())))
+            .collect();
+        if light {
+            if let Some(c) = from.get("light.color").filter(|c| c.get("preset").is_some() || c.get("hsv").is_some()) {
+                v.insert("light.color".into(), c.clone());
+            }
+        }
+        v
+    }
+
     /// A mic appeared. `reconnect` is true when one was connected earlier in this run.
     pub fn connect(&mut self, mut dev: Device, reconnect: bool) {
         let mut pending = Vec::new();
@@ -231,24 +253,36 @@ impl<A: Audio> Core<A> {
         let vendor = dev.get(id.vendor_id, &mut |f| pending.push(f.clone()));
         let product = dev.get(id.product_id, &mut |f| pending.push(f.clone()));
         if !matches!(vendor, Ok(v) if v == id.vendor) || !matches!(product, Ok(p) if id.products.contains(&p)) {
-            self.emit(json!({ "ev": "error", "code": "identity", "message": format!("not a PD100W (vendor {vendor:?}, product {product:?})") }));
-            self.link = Link::Disconnected;
+            // serve re-probes every second; once we already know this device is
+            // unsupported, do not emit the same identity error again and again.
+            if self.link != Link::Unsupported {
+                self.emit(json!({ "ev": "error", "code": "identity", "message": format!("not a PD100W (vendor {vendor:?}, product {product:?})") }));
+            }
+            self.dev = None;
+            self.model = None;
+            self.link = Link::Unsupported;
+            self.emit_state();
             return;
         }
-        let previous = std::mem::take(&mut self.mic);
         if self.owner {
             let _ = dev.set(&[(self.desc.meter.id, self.desc.meter.off as i64)]);
         }
+        // Declared before the match so a read_all failure (the Err arm) leaves
+        // self.mic untouched instead of losing the pre-unplug values to a take().
+        let previous;
         match state::read_all(&mut dev, &self.desc, &mut |f| pending.push(f.clone())) {
             Ok(values) => {
-                self.mic = values;
+                previous = std::mem::replace(&mut self.mic, values);
                 self.model = Some(dev.model);
                 self.dev = Some(dev);
                 self.link = Link::Connected;
             }
             Err(e) => {
                 self.emit(json!({ "ev": "error", "code": "device", "message": e.to_string() }));
+                self.dev = None;
+                self.model = None;
                 self.link = Link::Disconnected;
+                self.emit_state();
                 return;
             }
         }
@@ -262,7 +296,8 @@ impl<A: Audio> Core<A> {
             if let Some(id) = self.config.active_profile.clone() {
                 // `previous` holds what we knew before the unplug; dirty means it had unsaved edits.
                 self.recover = self.profiles.get(&id).filter(|p| profiles::dirty(p, &previous, &self.filter, &self.fschema, &self.presets)).map(|_| {
-                    let keep: Values = self.desc.fields.iter().filter(|f| f.profile).filter_map(|f| previous.get(&f.key).filter(|v| !v.is_null()).map(|v| (f.key.clone(), v.clone()))).collect();
+                    let mut keep = self.profile_values(&previous, false);
+                    keep.extend(self.profile_values(&previous, true));
                     (keep, self.filter.clone())
                 });
                 let r = match self.apply_profile(&id) {
@@ -310,7 +345,9 @@ impl<A: Audio> Core<A> {
         }
     }
 
-    /// Handle one JSONL request. Always emits exactly one ack, then a state.
+    /// Handle one JSONL request. A well-formed request always emits an ack
+    /// then a state; a line that fails to parse emits only an ack (bad
+    /// request: ack only, since there is no command to have changed anything).
     pub fn handle_line(&mut self, line: &str) {
         let req: Request = match serde_json::from_str(line) {
             Ok(r) => r,
@@ -324,12 +361,15 @@ impl<A: Audio> Core<A> {
             Ok(v) => (true, v),
             Err(v) => (false, v),
         };
-        let mut ack = json!({ "ev": "ack", "id": req.id, "ok": ok });
-        if let Value::Object(m) = extra {
-            for (k, v) in m {
-                ack[k] = v;
-            }
-        }
+        // Start from the handler's own result, then set the envelope fields
+        // last: a handler can never clobber ev/id/ok by returning those keys.
+        let mut ack = match extra {
+            Value::Object(m) => Value::Object(m),
+            _ => json!({}),
+        };
+        ack["ev"] = json!("ack");
+        ack["id"] = req.id.unwrap_or(Value::Null);
+        ack["ok"] = json!(ok);
         self.emit(ack);
         self.emit_state();
     }
@@ -343,7 +383,7 @@ impl<A: Audio> Core<A> {
                 let next = self.fschema.with_changes(&self.filter, &changes, &self.presets).map_err(|e| json!({ "error": "invalid", "details": e }))?;
                 let outcome = self.filterctl.apply(&next).map_err(err)?;
                 self.filter = next;
-                Ok(json!({ "restarted": outcome == Outcome::Restarted }))
+                Ok(json!({ "restarted": outcome == Outcome::Restarted, "filter": self.filter }))
             }
             Cmd::SourceDefault { which } => {
                 let name = match which.as_str() {
@@ -361,7 +401,15 @@ impl<A: Audio> Core<A> {
                 let (list, warnings) = self.profiles.list();
                 Ok(json!({ "profiles": list, "warnings": warnings }))
             }
-            Cmd::ProfileApply { profile } => self.apply_profile(&profile),
+            Cmd::ProfileApply { profile } => {
+                // An explicit apply supersedes any unsaved edits a previous
+                // reconnect's reapply was holding onto; connect()'s own call to
+                // apply_profile (which sets self.recover right before calling
+                // it) must not go through this arm, or it would wipe out the
+                // very snapshot it just took.
+                self.recover = None;
+                self.apply_profile(&profile)
+            }
             Cmd::ProfileSave { name, groups, overwrite } => self.save_profile(&name, &groups, overwrite.as_deref()),
             Cmd::ProfileRename { profile, name } => {
                 self.profiles.rename(&profile, &name).map_err(err)?;
@@ -405,10 +453,12 @@ impl<A: Audio> Core<A> {
             }
             Cmd::Recover => {
                 let (mic, filt) = self.recover.take().ok_or_else(|| err("nothing to recover"))?;
-                self.set_mic(&mic)?;
+                // `set_mic` already returns {"effective": ...} on success, which is
+                // exactly what the recover ack needs to carry.
+                let v = self.set_mic(&mic)?;
                 self.filterctl.apply(&filt).map_err(err)?;
                 self.filter = filt;
-                Ok(json!({}))
+                Ok(v)
             }
         }
     }
@@ -452,10 +502,11 @@ impl<A: Audio> Core<A> {
         }
         match r {
             Ok(eff) => {
-                for (k, v) in eff.iter().filter(|(_, v)| !v.is_null()) {
+                // The write went out but a key that did not read back is unconfirmed:
+                // record it as null rather than keeping the stale previous value.
+                for (k, v) in &eff {
                     self.mic.insert(k.clone(), v.clone());
                 }
-                // A key the mic did not read back is not confirmed: the UI must not keep it.
                 let missing: Vec<&String> = eff.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k).collect();
                 if missing.is_empty() {
                     Ok(json!({ "effective": eff }))
@@ -474,11 +525,19 @@ impl<A: Audio> Core<A> {
         let mut applied: Vec<&str> = Vec::new();
         let mut failed: Vec<Value> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
+        // {} when there is no device group to apply (spec §4: acks carry effective values).
+        let mut effective = Value::Object(Values::new());
         let device: Values = p.mic.iter().chain(p.light.iter()).flatten().map(|(k, v)| (k.clone(), v.clone())).collect();
         if !device.is_empty() {
             match self.set_mic(&device) {
-                Ok(_) => applied.push("mic"),
-                Err(e) => failed.push(json!({ "group": "mic", "error": e })),
+                Ok(v) => {
+                    applied.push("mic");
+                    effective = v.get("effective").cloned().unwrap_or(effective);
+                }
+                Err(e) => {
+                    effective = e.get("effective").cloned().unwrap_or(effective);
+                    failed.push(json!({ "group": "mic", "error": e }));
+                }
             }
         }
         if let Some(changes) = &p.filter {
@@ -502,31 +561,17 @@ impl<A: Audio> Core<A> {
             self.config.active_profile = Some(id.to_string());
             self.partial = None;
             self.save_config()?;
-            Ok(json!({ "applied": applied, "warnings": warnings }))
+            Ok(json!({ "applied": applied, "warnings": warnings, "effective": effective }))
         } else {
             self.partial = Some(json!({ "profile": id, "applied": applied, "failed": failed }));
-            Err(json!({ "error": "partially applied", "applied": applied, "failed": failed, "warnings": warnings }))
+            Err(json!({ "error": "partially applied", "applied": applied, "failed": failed, "warnings": warnings, "effective": effective }))
         }
     }
 
     fn save_profile(&mut self, name: &str, groups: &[String], overwrite: Option<&str>) -> Result<Value, Value> {
         let has = |g: &str| groups.iter().any(|x| x == g);
-        let pick = |light: bool| -> Values {
-            self.desc
-                .fields
-                .iter()
-                .filter(|f| f.profile && f.key.starts_with("light.") == light)
-                .filter_map(|f| self.mic.get(&f.key).filter(|v| !v.is_null()).map(|v| (f.key.clone(), v.clone())))
-                .collect()
-        };
-        let mic = has("mic").then(|| pick(false));
-        let light = has("light").then(|| {
-            let mut l = pick(true);
-            if let Some(c) = self.mic.get("light.color").filter(|c| c.get("preset").is_some() || c.get("hsv").is_some()) {
-                l.insert("light.color".into(), c.clone());
-            }
-            l
-        });
+        let mic = has("mic").then(|| self.profile_values(&self.mic, false));
+        let light = has("light").then(|| self.profile_values(&self.mic, true));
         let filt = has("filter").then(|| filter::flatten(&self.filter));
         let p = match overwrite {
             Some(id) => {
@@ -627,9 +672,13 @@ mod tests {
         regs.push((0x0017, 0x0999));
         let (dev, fake) = FakeMic::new(&regs);
         c.connect(dev, false);
-        assert_eq!(c.link, Link::Disconnected);
+        assert_eq!(c.link, Link::Unsupported);
         assert!(c.take_events().iter().any(|e| e["ev"] == "error" && e["code"] == "identity"));
         assert_eq!(fake.reg(0x0045), Some(0), "nothing was written");
+        // serve re-probes every second; once already Unsupported, no repeat spam.
+        let (dev2, _fake2) = FakeMic::new(&regs);
+        c.connect(dev2, false);
+        assert!(!c.take_events().iter().any(|e| e["ev"] == "error"), "no second identity error");
     }
 
     #[test]
@@ -640,6 +689,7 @@ mod tests {
         assert_eq!((a["ok"].clone(), a["error"].clone()), (json!(false), json!("timeout")));
         assert_eq!(a["keys"], json!(["mic.gain"]));
         assert_eq!(fake.reg(0x207E), Some(9), "the write itself went out");
+        assert!(c.mic["mic.gain"].is_null(), "unconfirmed, not the stale previous value");
     }
 
     #[test]
@@ -753,6 +803,22 @@ mod tests {
         assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "recover"}))["ok"], true);
         assert_eq!(fake2.reg(0x207E), Some(7), "the unsaved gain is back");
         assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "recover"}))["ok"], false, "only once");
+    }
+
+    #[test]
+    fn recover_snapshot_keeps_light_color() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "profile.apply", "profile": "grabacion"}))["ok"], true);
+        // grabacion does not manage light; the mic.gain change is what makes this
+        // dirty (and so worth a recovery snapshot) - light.color rides along in
+        // the same snapshot and must not be dropped from it.
+        ask(&mut c, json!({"id": 2, "cmd": "set", "changes": {"mic.gain": 7, "light.color": {"preset": "blue"}}}));
+        assert_eq!(c.state_json()["dirty"], true);
+        let (dev2, _fake2) = FakeMic::new(&pd100w_regs());
+        c.connect(dev2, true);
+        assert_eq!(c.mic["light.color"], json!({"preset": "red"}), "grabacion's reapply leaves the reconnected device's own colour");
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "recover"}))["ok"], true);
+        assert_eq!(c.mic["light.color"], json!({"preset": "blue"}), "the unsaved colour is back");
     }
 
     #[test]
