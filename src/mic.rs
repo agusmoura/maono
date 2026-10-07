@@ -22,8 +22,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-/// USB ids of the receiver, as they appear in a hidraw uevent's `HID_ID`.
-const HID_MATCH: &str = "352F:0414";
+/// USB ids as they appear in a hidraw uevent's `HID_ID`: the wireless
+/// receiver (0414) and the mic itself plugged in by cable (0417).
+const HID_MATCH: [&str; 2] = ["352F:0414", "352F:0417"];
 
 const SET: u8 = 0x03; // host -> device, and what the device uses to notify
 const GET: u8 = 0x04; // host -> device, device answers with the same type
@@ -90,7 +91,8 @@ pub fn find_device() -> Option<String> {
         let uevent = node.join("device/uevent");
         if let Ok(text) = fs::read_to_string(&uevent) {
             // HID_ID looks like 0003:0000352F:00000414
-            if text.to_uppercase().replace("0000", "").contains(HID_MATCH) {
+            let id = text.to_uppercase().replace("0000", "");
+            if HID_MATCH.iter().any(|m| id.contains(m)) {
                 let name = node.file_name()?.to_str()?.to_string();
                 return Some(format!("/dev/{name}"));
             }

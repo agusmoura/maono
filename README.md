@@ -72,7 +72,8 @@ Without the udev rule you get:
 maono: /dev/hidraw3 needs the udev rule - see 99-maono.rules
 ```
 
-`99-maono.rules` matches USB `352f:0414` and does two things: it tags the node
+`99-maono.rules` matches USB `352f:0414` (the wireless receiver) and
+`352f:0417` (the mic plugged in by cable) and does two things: it tags the node
 with `uaccess`, which hands it to the user logged in at the local seat, and it
 sets group `input` as a fallback for headless logins. If you rely on the group
 fallback, add yourself to it once and log out and back in:
@@ -248,9 +249,10 @@ account. `workflow_dispatch` re-runs it against an existing tag.
 
 ## Status
 
-Tested against one PD100W receiver on Arch Linux. Other Maono receivers use
-different USB ids and are not detected; if you have one, the id to change is
-`HID_MATCH` in `src/mic.rs`.
+Tested against one PD100W receiver on Arch Linux, and against a PD100W plugged
+in by cable (USB `352f:0417`), which speaks the same protocol on the same field
+slot. Other Maono receivers use different USB ids and are not detected; if you
+have one, the id to add is in `HID_MATCH` in `src/mic.rs`.
 
 Unofficial and unaffiliated with Maono.
 

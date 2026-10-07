@@ -1,4 +1,5 @@
-# Maono PD100W wireless microphone receiver (USB 352f:0414)
+# Maono PD100W: wireless receiver (USB 352f:0414) or the mic plugged in by
+# cable (USB 352f:0417)
 #
 # The receiver speaks a vendor HID protocol, so maono talks to its
 # /dev/hidraw* node directly. By default that node is root-only.
@@ -13,3 +14,4 @@
 # Then replug the receiver.
 
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="352f", ATTRS{idProduct}=="0414", TAG+="uaccess", MODE="0660", GROUP="input"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="352f", ATTRS{idProduct}=="0417", TAG+="uaccess", MODE="0660", GROUP="input"
