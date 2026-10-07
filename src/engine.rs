@@ -540,11 +540,7 @@ impl<A: Audio> Core<A> {
             None => self.profiles.create(name, mic, light, filt).map_err(err)?,
         };
         self.emit_profiles();
-        // Deliberately keyed "id", not "profile": the ack's own request id is of no
-        // further use once the profile has been created, and the caller wants the
-        // new profile's id back under the same key it would read any other ack's
-        // request id from.
-        Ok(json!({ "id": p.id }))
+        Ok(json!({ "profile": p.id }))
     }
 
     fn light_custom(&mut self, op: &str, index: Option<usize>, hsv: Option<&Value>) -> Result<Value, Value> {
@@ -763,7 +759,7 @@ mod tests {
     fn save_rename_delete_profiles() {
         let (mut c, _fake) = connected();
         let a = ask(&mut c, json!({"id": 1, "cmd": "profile.save", "name": "Mi Voz", "groups": ["mic", "filter"]}));
-        assert_eq!(a["id"], "mi-voz");
+        assert_eq!(a["profile"], "mi-voz");
         let p = c.profiles.get("mi-voz").unwrap();
         assert!(p.light.is_none());
         assert_eq!(p.mic.unwrap()["mic.gain"], 20);
