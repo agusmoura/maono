@@ -44,7 +44,7 @@ del EQ se diseñan a mano. No se construye un generador genérico de formularios
 
 ## 2. Hechos del hardware (calibración del 2026-10-07)
 
-El mapa completo está en el informe de ingeniería inversa (Maono Link 3.8.52, `libPD100XW.dylib`).
+El mapa completo está en `docs/protocol/pd100w.md` (ingeniería inversa de Maono Link 3.8.52, `libPD100XW.dylib`).
 Resumen de lo verificado sobre el mic real:
 
 | Estado | Qué |
