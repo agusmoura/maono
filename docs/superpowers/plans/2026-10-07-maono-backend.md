@@ -456,7 +456,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `descriptor::Encoding { Raw, Db10_2000, X100 }`
   - `descriptor::Field { key: String, id: u16, kind: Kind, min/max/step: Option<f64>, unit: Option<String>, encoding: Encoding, options: Vec<Opt>, group: String, status: String, profile: bool, mask: Option<String> }` with `to_raw(&Value) -> Result<u16, String>` and `from_raw(u16) -> Value`
   - `descriptor::{Opt { value: i64, label: String }, LightMeta { color: u16, count: u16, base: u16, custom_max: u16, presets: Vec<ColorPreset> }, ColorPreset { value: u16, name: String, hex: String }, Span { start: u16, count: u16 }, Meter { id: u16, off: u16 }}`
-  - `descriptor::Descriptor { fields: Vec<Field>, readonly: Vec<Field>, light: LightMeta, serial: Span, meter: Meter }` with `load()`, `parse(&str)`, `field(&str) -> Option<&Field>`, `field_by_id(u16) -> Option<&Field>`, `schema() -> Value`
+  - `descriptor::Identity { vendor_id: u16, product_id: u16, vendor: u16, products: Vec<u16> }`
+  - `descriptor::Descriptor { fields: Vec<Field>, readonly: Vec<Field>, light: LightMeta, serial: Span, meter: Meter, identity: Identity }` with `load()`, `parse(&str)`, `field(&str) -> Option<&Field>`, `field_by_id(u16) -> Option<&Field>`, `schema() -> Value`
 
 - [ ] **Step 1: Create the data file**
 
@@ -504,6 +505,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   ],
   "serial": {"start": "0x001E", "count": 16},
   "meter": {"id": "0x0045", "off": 1},
+  "identity": {"vendorId": "0x0016", "productId": "0x0017", "vendor": "0x352F", "products": ["0x0417", "0x0414"]},
   "light": {
     "color": "0x208C", "count": "0x208E", "base": "0x208F", "customMax": 5,
     "presets": [
@@ -751,6 +753,27 @@ pub struct Span {
     pub count: u16,
 }
 
+fn hex_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u16>, D::Error> {
+    Vec::<String>::deserialize(d)?
+        .iter()
+        .map(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+/// Registers that must read back as this device before we touch it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    #[serde(deserialize_with = "hex_u16")]
+    pub vendor_id: u16,
+    #[serde(deserialize_with = "hex_u16")]
+    pub product_id: u16,
+    #[serde(deserialize_with = "hex_u16")]
+    pub vendor: u16,
+    #[serde(deserialize_with = "hex_list")]
+    pub products: Vec<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meter {
     #[serde(deserialize_with = "hex_u16", serialize_with = "ser_hex")]
@@ -796,6 +819,7 @@ struct RawDescriptor {
     readonly: Vec<Field>,
     serial: Span,
     meter: Meter,
+    identity: Identity,
     light: LightMeta,
 }
 
@@ -806,6 +830,7 @@ pub struct Descriptor {
     pub light: LightMeta,
     pub serial: Span,
     pub meter: Meter,
+    pub identity: Identity,
     by_key: HashMap<String, usize>,
     by_id: HashMap<u16, usize>,
 }
@@ -845,7 +870,7 @@ impl Descriptor {
             by_key.insert(f.key.clone(), i);
             by_id.insert(f.id, i);
         }
-        Ok(Descriptor { fields, readonly: raw.readonly, light: raw.light, serial: raw.serial, meter: raw.meter, by_key, by_id })
+        Ok(Descriptor { fields, readonly: raw.readonly, light: raw.light, serial: raw.serial, meter: raw.meter, identity: raw.identity, by_key, by_id })
     }
 
     fn at(&self, i: usize) -> &Field {
@@ -1017,7 +1042,7 @@ impl FakeMic {
 /// The real mic's registers as read on 2026-10-07 (docs/protocol/pd100w.md).
 pub fn pd100w_regs() -> Vec<(u16, u16)> {
     let mut r = vec![
-        (0x000B, 108), (0x0042, 70), (0x0049, 0), (0x0045, 0),
+        (0x000B, 108), (0x0042, 70), (0x0049, 0), (0x0045, 0), (0x0016, 0x352F), (0x0017, 0x0417),
         (0x207D, 0), (0x207E, 20), (0x207F, 10), (0x2084, 1), (0x2085, 0), (0x20AF, 7),
         (0x2089, 0), (0x208A, 15), (0x208B, 0), (0x208C, 1), (0x208E, 0),
         (0x2069, 0), (0x206A, 1800), (0x206B, 20), (0x206C, 800), (0x206D, 2),
@@ -1790,7 +1815,7 @@ Add `pub mod store; pub mod config;` to `src/lib.rs`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `mise exec rust@stable -- cargo test --lib store config`
+Run: `mise exec rust@stable -- cargo test --lib -- store config`
 Expected: compile errors `cannot find function 'write_atomic'`, `cannot find type 'Config'`.
 
 - [ ] **Step 3: Implement**
@@ -1935,7 +1960,7 @@ impl Config {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `mise exec rust@stable -- cargo test --lib store config`
+Run: `mise exec rust@stable -- cargo test --lib -- store config`
 Expected: `4 passed`.
 
 - [ ] **Step 5: Commit**
@@ -2054,13 +2079,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
       "package": "lsp-plugins-ladspa", "file": "lsp-plugins-ladspa.so", "plugin": "lsp-plugins-ladspa", "label": "http://lsp-plug.in/plugins/ladspa/compressor_mono",
       "in": "Input", "out": "Output",
       "controls": {"threshold": "Attack threshold (G)", "ratio": "Ratio", "attack": "Attack time (ms)", "release": "Release time (ms)", "makeup": "Makeup gain (G)"},
-      "switch": {"port": "Bypass", "on": 1, "off": 0}
+      "switch": {"port": "Bypass", "on": 0, "off": 1}
     }
   }
 }
 ```
 
-Leave the `switch` polarities as written: LSP's "Bypass" port defaults to 1 (processing), and RNNoise's "Dry Mix" 1 is assumed to be fully dry. Task 13 confirms both on hardware, and a wrong polarity is fixed in this JSON alone.
+Switch polarities come from the LADSPA port hints (Task-8-era dump): LSP's `Bypass` is `0x205` = DEFAULT_0 | TOGGLED, so 0 means processing and 1 means bypassed; RNNoise's `Dry Mix` is `0x203` = DEFAULT_0, so 0 means fully processed and 1 fully dry. Task 13 confirms both by measurement, and a wrong polarity is fixed in this JSON alone (tests read the values from the schema).
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -2138,15 +2163,15 @@ mod tests {
         assert_eq!(get(&p, "b0:Gain"), 0.0);
         assert_eq!(get(&p, "lpf:Freq"), 22000.0);
         assert_eq!(get(&p, "rnnoise:VAD Threshold (%)"), 0.0);
-        assert_eq!(get(&p, "rnnoise:Dry Mix"), 1.0);
-        assert_eq!(get(&p, "comp:Bypass"), 0.0);
+        assert_eq!(get(&p, "rnnoise:Dry Mix"), s.plugins.rnnoise.switch.off);
+        assert_eq!(get(&p, "comp:Bypass"), s.plugins.comp.switch.off);
         d.enabled = true;
         d.comp.on = true;
         d.comp.threshold = -20.0;
         let p = params(&d, &deps, &s);
-        assert_eq!(get(&p, "comp:Bypass"), 1.0);
+        assert_eq!(get(&p, "comp:Bypass"), s.plugins.comp.switch.on);
         assert!((get(&p, "comp:Attack threshold (G)") - 0.1).abs() < 1e-9);
-        assert_eq!(get(&p, "rnnoise:Dry Mix"), 0.0);
+        assert_eq!(get(&p, "rnnoise:Dry Mix"), s.plugins.rnnoise.switch.on);
     }
 
     #[test]
@@ -2876,7 +2901,7 @@ Add `pub mod pw; pub mod filterctl;` to `src/lib.rs`.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `mise exec rust@stable -- cargo test --lib pw filterctl`
+Run: `mise exec rust@stable -- cargo test --lib -- pw filterctl`
 Expected: compile errors `cannot find function 'find_capture_node'`, `cannot find type 'FilterCtl'`.
 
 - [ ] **Step 4: Implement `pw.rs`**
@@ -3221,7 +3246,7 @@ impl<A: Audio> FilterCtl<A> {
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `mise exec rust@stable -- cargo test --lib pw filterctl`
+Run: `mise exec rust@stable -- cargo test --lib -- pw filterctl`
 Expected: `8 passed`.
 
 - [ ] **Step 7: Commit**
@@ -3702,6 +3727,28 @@ mod tests {
     }
 
     #[test]
+    fn a_device_with_the_wrong_identity_is_not_used() {
+        let (mut c, _) = core();
+        let mut regs = pd100w_regs();
+        regs.push((0x0017, 0x0999));
+        let (dev, fake) = FakeMic::new(&regs);
+        c.connect(dev, false);
+        assert_eq!(c.link, Link::Disconnected);
+        assert!(c.take_events().iter().any(|e| e["ev"] == "error" && e["code"] == "identity"));
+        assert_eq!(fake.reg(0x0045), Some(0), "nothing was written");
+    }
+
+    #[test]
+    fn readback_timeout_is_not_ok() {
+        let (mut c, fake) = connected();
+        fake.silent.store(true, std::sync::atomic::Ordering::SeqCst);
+        let a = ask(&mut c, json!({"id": 1, "cmd": "set", "changes": {"mic.gain": 9}}));
+        assert_eq!((a["ok"].clone(), a["error"].clone()), (json!(false), json!("timeout")));
+        assert_eq!(a["keys"], json!(["mic.gain"]));
+        assert_eq!(fake.reg(0x207E), Some(9), "the write itself went out");
+    }
+
+    #[test]
     fn set_acks_effective_values_and_invalid_writes_nothing() {
         let (mut c, fake) = connected();
         let a = ask(&mut c, json!({"id": 1, "cmd": "set", "changes": {"mic.gain": 14}}));
@@ -3963,6 +4010,9 @@ pub struct Core<A: Audio> {
     pub link: Link,
     pub model: Option<Model>,
     pub mic: Values,
+    /// True in `maono serve`: silence the HID meter and keep the filter chain up on
+    /// connect. The one-shot CLI sets it false so a read never writes anything.
+    pub owner: bool,
     partial: Option<Value>,
     /// Unsaved mic/filter values from before a reconnect reapplied the profile.
     recover: Option<(Values, FilterState)>,
@@ -3998,6 +4048,7 @@ impl<A: Audio> Core<A> {
             link: Link::Disconnected,
             model: None,
             mic: Values::new(),
+            owner: true,
             partial: None,
             recover: None,
             warnings,
@@ -4082,9 +4133,19 @@ impl<A: Audio> Core<A> {
 
     /// A mic appeared. `reconnect` is true when one was connected earlier in this run.
     pub fn connect(&mut self, mut dev: Device, reconnect: bool) {
-        let previous = std::mem::take(&mut self.mic);
-        let _ = dev.set(&[(self.desc.meter.id, self.desc.meter.off as i64)]);
         let mut pending = Vec::new();
+        let id = self.desc.identity.clone();
+        let vendor = dev.get(id.vendor_id, &mut |f| pending.push(f.clone()));
+        let product = dev.get(id.product_id, &mut |f| pending.push(f.clone()));
+        if !matches!(vendor, Ok(v) if v == id.vendor) || !matches!(product, Ok(p) if id.products.contains(&p)) {
+            self.emit(json!({ "ev": "error", "code": "identity", "message": format!("not a PD100W (vendor {vendor:?}, product {product:?})") }));
+            self.link = Link::Disconnected;
+            return;
+        }
+        let previous = std::mem::take(&mut self.mic);
+        if self.owner {
+            let _ = dev.set(&[(self.desc.meter.id, self.desc.meter.off as i64)]);
+        }
         match state::read_all(&mut dev, &self.desc, &mut |f| pending.push(f.clone())) {
             Ok(values) => {
                 self.mic = values;
@@ -4101,7 +4162,7 @@ impl<A: Audio> Core<A> {
         for f in &pending {
             self.on_frame(f);
         }
-        if !self.filterctl.is_applied() {
+        if self.owner && !self.filterctl.is_applied() {
             self.start_filter();
         }
         if reconnect && self.config.apply_on_reconnect {
@@ -4298,10 +4359,16 @@ impl<A: Audio> Core<A> {
         }
         match r {
             Ok(eff) => {
-                for (k, v) in &eff {
+                for (k, v) in eff.iter().filter(|(_, v)| !v.is_null()) {
                     self.mic.insert(k.clone(), v.clone());
                 }
-                Ok(json!({ "effective": eff }))
+                // A key the mic did not read back is not confirmed: the UI must not keep it.
+                let missing: Vec<&String> = eff.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k).collect();
+                if missing.is_empty() {
+                    Ok(json!({ "effective": eff }))
+                } else {
+                    Err(json!({ "error": "timeout", "keys": missing, "effective": eff }))
+                }
             }
             Err(e) => Err(self.apply_err(e)),
         }
@@ -4414,7 +4481,7 @@ impl<A: Audio> Core<A> {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `mise exec rust@stable -- cargo test --lib engine`
-Expected: `14 passed`.
+Expected: `16 passed` (the timeout test takes ~1 s).
 
 - [ ] **Step 5: Run the whole suite**
 
@@ -4887,6 +4954,7 @@ pub fn request(req: Value) -> Result<Value, String> {
         return Err("maono serve is running but its socket does not answer".into());
     }
     let mut core = Core::new(store::config_dir(), store::pipewire_conf(), pw::System { schema: FilterSchema::load() });
+    core.owner = false; // one-shot: reads write nothing; only filter/profile/source commands touch PipeWire
     core.filterctl.adopt(&core.filter.clone());
     if let Some(f) = device::find().first() {
         match Device::open(f) {
@@ -5061,7 +5129,7 @@ Keep `lock` alive for the rest of `run` by not dropping it: it is a local that l
 Run: `mise exec rust@stable -- cargo test --lib && mise exec rust@stable -- cargo build --release`
 Expected: all tests pass and the release build succeeds.
 
-Then check the CLI in direct mode. This only reads the mic, so no authorization is needed:
+Then check the CLI in direct mode. These commands only read, so no authorization is needed:
 
 ```bash
 ./target/release/maono status --json
@@ -5074,7 +5142,7 @@ Expected:
 - `profile list` shows 4 profiles;
 - `schema` prints JSON.
 
-`status` in direct mode will (re)write the filter conf only if `adopt` fails. It cannot fail silently: if the PipeWire node does not match, the next filter command rebuilds it. That is expected on first run.
+Direct mode runs with `core.owner = false`, so these three commands write nothing to the mic or PipeWire (they only create `~/.config/maono/` with the factory profiles). Do not run `profile apply`, `filter set` or `source` here; that is Task 13.
 
 - [ ] **Step 7: Commit**
 
@@ -5118,7 +5186,7 @@ pactl get-default-source
 
 Expected:
 - the ack has `"applied": ["mic", "filter"]`;
-- the dump shows the nodes `hp1, hp2, b0..b4, lpf, rnnoise, comp` with `rnnoise:VAD Threshold (%)` 85 and `comp:Bypass` 1;
+- the dump shows the nodes `hp1, hp2, b0..b4, lpf, rnnoise, comp` with `rnnoise:VAD Threshold (%)` 85 and `comp:Bypass` 0 (llamada turns the compressor on);
 - the default source is still `maono_clean`.
 
 - [ ] **Step 3: Verify the two switch polarities by measurement**
