@@ -932,6 +932,19 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_user_preset_keeps_profiles_that_used_it() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "filter.set", "changes": {"eq.bands.0.gain": 3}}))["ok"], true);
+        let preset = ask(&mut c, json!({"id": 2, "cmd": "eq.preset.save", "name": "Mi EQ"}))["preset"].clone();
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "filter.set", "changes": {"eq.preset": preset}}))["ok"], true);
+        assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "profile.save", "name": "Con EQ", "groups": ["filter"]}))["ok"], true);
+        assert_eq!(ask(&mut c, json!({"id": 5, "cmd": "eq.preset.delete", "preset": preset}))["ok"], true);
+        let a = ask(&mut c, json!({"id": 6, "cmd": "profile.apply", "profile": "con-eq"}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!((c.filter.eq.preset.clone(), c.filter.eq.bands[0].gain), (None, 3.0));
+    }
+
+    #[test]
     fn save_rename_delete_profiles() {
         let (mut c, _fake) = connected();
         let a = ask(&mut c, json!({"id": 1, "cmd": "profile.save", "name": "Mi Voz", "groups": ["mic", "filter"]}));

@@ -205,9 +205,14 @@ impl FilterSchema {
     /// explicit curve edit without a preset clears `eq.preset`.
     pub fn with_changes(&self, base: &FilterState, changes: &Values, presets: &Presets) -> Result<FilterState, Vec<String>> {
         let mut v = serde_json::to_value(base).expect("FilterState serializes");
+        let has_bands = changes.keys().any(|k| k.starts_with("eq.bands."));
+        let mut stale = false;
         if let Some(id) = changes.get("eq.preset") {
             match id.as_str().and_then(|id| presets.get(id)) {
                 Some(p) => p.apply_to(&mut v),
+                // A deleted user preset named next to its own bands (a saved
+                // profile): the bands are the truth, the name is a stale label.
+                None if has_bands => stale = true,
                 None => return Err(vec![format!("eq.preset: unknown preset {id}")]),
             }
         }
@@ -218,7 +223,7 @@ impl FilterSchema {
             }
         }
         let curve_edit = changes.keys().any(|k| k.starts_with("eq.bands") || k.starts_with("hpf.") || k.starts_with("lpf."));
-        if curve_edit && !changes.contains_key("eq.preset") {
+        if stale || (curve_edit && !changes.contains_key("eq.preset")) {
             v["eq"]["preset"] = Value::Null;
         }
         let s: FilterState = serde_json::from_value(v).map_err(|e| vec![e.to_string()])?;
@@ -533,6 +538,16 @@ mod tests {
         assert_eq!(st.eq.preset, None);
 
         assert!(!s.with_changes(&d, &ch(json!({"eq.preset": "pop"})), &p).unwrap().lpf.on);
+    }
+
+    #[test]
+    fn a_deleted_preset_with_its_bands_is_a_stale_label() {
+        let (s, p, d) = setup();
+        // What a profile saved with a since-deleted user preset carries.
+        let st = s.with_changes(&d, &ch(json!({"eq.preset": "my-eq", "eq.bands.0.gain": 4, "hpf.freq": 90})), &p).unwrap();
+        assert_eq!(st.eq.preset, None);
+        assert_eq!((st.eq.bands[0].gain, st.hpf.freq), (4.0, 90.0));
+        assert!(s.with_changes(&d, &ch(json!({"eq.preset": "my-eq", "hpf.freq": 90})), &p).is_err(), "no bands: still unknown");
     }
 
     #[test]
