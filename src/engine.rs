@@ -435,10 +435,14 @@ impl<A: Audio> Core<A> {
                     _ => return Err(err("which must be clean or raw")),
                 };
                 self.filterctl.audio.set_default_source(&name).map_err(err)?;
-                if self.filterctl.audio.default_source().as_deref() != Some(name.as_str()) {
-                    return Err(err("PipeWire did not switch the default source"));
+                // WirePlumber applies it asynchronously: give it up to 5 x 60 ms.
+                for _ in 0..5 {
+                    if self.filterctl.audio.default_source().as_deref() == Some(name.as_str()) {
+                        return Ok(json!({ "defaultSource": name }));
+                    }
+                    std::thread::sleep(Duration::from_millis(60));
                 }
-                Ok(json!({ "defaultSource": name }))
+                Err(err("PipeWire did not switch the default source"))
             }
             Cmd::ProfileList => {
                 let (list, warnings) = self.profiles.list();
@@ -495,12 +499,14 @@ impl<A: Audio> Core<A> {
                 Ok(json!({}))
             }
             Cmd::Recover => {
-                let (mic, filt) = self.recover.take().ok_or_else(|| err("nothing to recover"))?;
+                // Cloned, not taken: a failed step leaves the snapshot for a retry.
+                let (mic, filt) = self.recover.clone().ok_or_else(|| err("nothing to recover"))?;
                 // `set_mic` already returns {"effective": ...} on success, which is
                 // exactly what the recover ack needs to carry.
                 let v = self.set_mic(&mic)?;
                 self.filterctl.apply(&filt).map_err(err)?;
                 self.filter = filt;
+                self.recover = None;
                 Ok(v)
             }
             Cmd::MonitorSet { on, source, force } => {
@@ -518,10 +524,13 @@ impl<A: Audio> Core<A> {
                     }
                     return Ok(json!({}));
                 }
+                if !self.owner {
+                    return Err(err("the live monitor needs maono serve (the Omarchy panel); it would stop as soon as this command exits"));
+                }
                 if !force && self.filterctl.audio.output_is_headphones() != Some(true) {
                     return Err(json!({
                         "error": "not-headphones",
-                        "message": "the default output does not look like headphones; monitoring through speakers feeds back (send force: true to do it anyway)",
+                        "message": "the default output does not look like headphones; monitoring through speakers feeds back (force: true, or `maono monitor on --force`, does it anyway)",
                     }));
                 }
                 // The requested source is resolved and started before it is
@@ -554,6 +563,38 @@ impl<A: Audio> Core<A> {
         self.filterctl.audio.stop_monitor();
         self.emit_state();
         self.emit(json!({ "ev": "error", "code": "monitor", "message": "output is no longer headphones; Live stopped" }));
+    }
+
+    /// serve calls this about every 60 s while connected: re-read the
+    /// read-only info.* fields (battery, charging) and announce what moved.
+    /// The first unanswered read ends the pass, so a silent mic blocks the
+    /// queue for one GET timeout at most.
+    pub fn refresh_info(&mut self) {
+        let Some(dev) = self.dev.as_mut() else { return };
+        let mut frames = Vec::new();
+        let mut read = Vec::new();
+        let mut gone = false;
+        for f in &self.desc.readonly {
+            match dev.get(f.id, &mut |x| frames.push(x.clone())) {
+                Ok(raw) => read.push((f.key.clone(), f.from_raw(raw))),
+                Err(e) => {
+                    gone = matches!(e, DevError::Gone);
+                    break;
+                }
+            }
+        }
+        for x in &frames {
+            self.on_frame(x);
+        }
+        for (key, v) in read {
+            if self.mic.get(&key) != Some(&v) {
+                self.mic.insert(key.clone(), v.clone());
+                self.emit(json!({ "ev": "changed", "key": key, "value": v, "source": "poll" }));
+            }
+        }
+        if gone {
+            self.disconnect(Link::Disconnected);
+        }
     }
 
     fn refresh(&mut self) -> Result<Value, Value> {
@@ -663,9 +704,29 @@ impl<A: Audio> Core<A> {
 
     fn save_profile(&mut self, name: &str, groups: &[String], overwrite: Option<&str>) -> Result<Value, Value> {
         let has = |g: &str| groups.iter().any(|x| x == g);
-        let mic = has("mic").then(|| self.profile_values(&self.mic, false));
-        let light = has("light").then(|| self.profile_values(&self.mic, true));
+        // A value as read may sit outside the write range (spec §4): it is left
+        // out and reported, so a saved profile always applies.
+        let mut skipped: Vec<String> = Vec::new();
+        let mut writable = |vals: Values| -> Values {
+            vals.into_iter()
+                .filter(|(k, v)| {
+                    let ok = match k.as_str() {
+                        "light.color" => state::check_color(&self.desc, v).is_ok(),
+                        _ => self.desc.field(k).is_some_and(|f| f.to_raw(v).is_ok()),
+                    };
+                    if !ok {
+                        skipped.push(k.clone());
+                    }
+                    ok
+                })
+                .collect()
+        };
+        let mic = has("mic").then(|| writable(self.profile_values(&self.mic, false)));
+        let light = has("light").then(|| writable(self.profile_values(&self.mic, true)));
         let filt = has("filter").then(|| filter::flatten(&self.filter));
+        // Only the content is checked here; Store::create owns the id and name rules.
+        let content = profiles::Profile { version: 1, id: "check".into(), name: "check".into(), mic: mic.clone(), light: light.clone(), filter: filt.clone() };
+        profiles::validate(&content, &self.desc, &self.fschema, &self.presets, &self.filter).map_err(|e| json!({ "error": "invalid profile", "details": e }))?;
         let p = match overwrite {
             Some(id) => {
                 let mut p = self.profiles.get(id).ok_or_else(|| err(format!("profile {id} not found")))?;
@@ -678,7 +739,7 @@ impl<A: Audio> Core<A> {
             None => self.profiles.create(name, mic, light, filt).map_err(err)?,
         };
         self.emit_profiles();
-        Ok(json!({ "profile": p.id }))
+        Ok(json!({ "profile": p.id, "skipped": skipped }))
     }
 
     fn light_custom(&mut self, op: &str, index: Option<usize>, hsv: Option<&Value>) -> Result<Value, Value> {
@@ -933,6 +994,65 @@ mod tests {
         assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "recover"}))["ok"], true);
         assert_eq!(fake2.reg(0x207E), Some(7), "the unsaved gain is back");
         assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "recover"}))["ok"], false, "only once");
+    }
+
+    #[test]
+    fn a_failed_recover_keeps_the_snapshot() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "profile.apply", "profile": "grabacion"}))["ok"], true);
+        ask(&mut c, json!({"id": 2, "cmd": "set", "changes": {"mic.gain": 7}}));
+        let (dev2, fake2) = FakeMic::new(&pd100w_regs());
+        c.connect(dev2, true);
+        // The filter step fails: the node is gone and does not come back.
+        c.filterctl.audio.node = None;
+        c.filterctl.audio.broken = true;
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "recover"}))["ok"], false);
+        assert!(c.recover.is_some(), "still recoverable");
+        c.filterctl.audio.broken = false;
+        assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "recover"}))["ok"], true);
+        assert_eq!(fake2.reg(0x207E), Some(7));
+        assert!(c.recover.is_none());
+    }
+
+    #[test]
+    fn save_skips_values_a_profile_could_not_apply() {
+        let (mut c, _fake) = connected();
+        c.mic.insert("mic.gain".into(), json!(99)); // as read: outside the write range
+        c.mic.insert("light.color".into(), json!({"hsv": [400.0, 1.0, 1.0]}));
+        let a = ask(&mut c, json!({"id": 1, "cmd": "profile.save", "name": "Raro"}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(a["skipped"], json!(["mic.gain", "light.color"]));
+        let p = c.profiles.get("raro").unwrap();
+        assert!(!p.mic.unwrap().contains_key("mic.gain"));
+        assert!(!p.light.unwrap().contains_key("light.color"));
+        assert_eq!(ask(&mut c, json!({"id": 2, "cmd": "profile.apply", "profile": "raro"}))["ok"], true);
+        c.filter.rnnoise.vad = 600.0; // unreachable through filter.set; save must still refuse it
+        assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "profile.save", "name": "Malo"}))["ok"], false);
+        assert!(c.profiles.get("malo").is_none());
+    }
+
+    #[test]
+    fn refresh_info_reports_what_moved() {
+        let (mut c, fake) = connected();
+        c.refresh_info();
+        assert!(c.take_events().is_empty());
+        fake.regs.lock().unwrap().insert(0x0042, 55);
+        fake.regs.lock().unwrap().insert(0x0049, 1);
+        c.refresh_info();
+        let ev = c.take_events();
+        assert!(ev.iter().any(|e| e["ev"] == "changed" && e["key"] == "info.battery" && e["value"] == 55), "{ev:?}");
+        assert!(ev.iter().any(|e| e["ev"] == "changed" && e["key"] == "info.charging" && e["value"] == true), "{ev:?}");
+        assert_eq!(c.mic["info.battery"], json!(55));
+    }
+
+    #[test]
+    fn one_shot_cli_refuses_the_live_monitor() {
+        let (mut c, _fake) = connected();
+        c.owner = false;
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}));
+        assert_eq!(a["ok"], false);
+        assert!(a["error"].as_str().unwrap().contains("needs maono serve"), "{a}");
+        assert_eq!(c.filterctl.audio.monitor, None);
     }
 
     #[test]

@@ -9,8 +9,9 @@ use crate::pw;
 use crate::store;
 use serde_json::{Map, Value, json};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 fn parse_kv(args: &[&str]) -> Result<Map<String, Value>, String> {
     let mut m = Map::new();
@@ -95,10 +96,17 @@ pub fn legacy_status_json(state: &Value) -> Value {
 
 fn via_socket(stream: UnixStream, mut req: Value) -> Result<Value, String> {
     req["id"] = json!(std::process::id());
+    // A wedged serve must not hang a keybind forever (profile.apply takes ~7 s at most).
+    stream.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
     let mut w = stream.try_clone().map_err(|e| e.to_string())?;
     writeln!(w, "{req}").map_err(|e| e.to_string())?;
     for line in BufReader::new(stream).lines() {
-        let v: Value = serde_json::from_str(&line.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let line = line.map_err(|e| match e.kind() {
+            // SO_RCVTIMEO surfaces as WouldBlock on Linux.
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => "maono serve did not answer within 15 s".to_string(),
+            _ => e.to_string(),
+        })?;
+        let v: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
         if v["ev"] == "ack" && v["id"] == req["id"] {
             return Ok(v);
         }

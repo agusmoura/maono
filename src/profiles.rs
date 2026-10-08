@@ -192,7 +192,7 @@ pub fn hex_to_hsv(hex: &str) -> Option<[f64; 3]> {
         60.0 * ((r - g) / d + 4.0)
     };
     let round2 = |x: f64| (x * 100.0).round() / 100.0;
-    Some([hue.round(), round2(if max == 0.0 { 0.0 } else { d / max }), round2(max)])
+    Some([hue.round() % 360.0, round2(if max == 0.0 { 0.0 } else { d / max }), round2(max)])
 }
 
 /// Omarchy's current theme accent as HSV, if the theme file has one.
@@ -301,5 +301,6 @@ mod tests {
         let [h, s, v] = hex_to_hsv("#f38d70").unwrap();
         assert!((h - 13.2).abs() < 0.5 && (s - 0.54).abs() < 0.01 && (v - 0.95).abs() < 0.01, "{h} {s} {v}");
         assert!(hex_to_hsv("nope").is_none());
+        assert_eq!(hex_to_hsv("#ff0001").unwrap()[0], 0.0, "359.8 rounds to 360, which is 0");
     }
 }

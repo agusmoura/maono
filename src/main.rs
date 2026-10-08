@@ -48,7 +48,19 @@ fn fail(msg: impl std::fmt::Display) -> ExitCode {
 fn ack_or_fail(r: Result<Value, String>) -> Result<Value, ExitCode> {
     match r {
         Ok(a) if a["ok"] == true => Ok(a),
-        Ok(a) => Err(fail(format!("{}{}", a["error"].as_str().unwrap_or("failed"), a.get("details").map(|d| format!(": {d}")).unwrap_or_default()))),
+        Ok(a) => {
+            // e.g. monitor.set's --force hint, or what a partial profile apply failed on.
+            let mut msg = a["error"].as_str().unwrap_or("failed").to_string();
+            for k in ["message", "details", "failed", "warnings"] {
+                match a.get(k) {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(v)) if v.is_empty() => {}
+                    Some(Value::String(s)) => msg += &format!("\n  {s}"),
+                    Some(v) => msg += &format!("\n  {k}: {v}"),
+                }
+            }
+            Err(fail(msg))
+        }
         Err(e) => Err(fail(e)),
     }
 }
@@ -117,13 +129,13 @@ fn main() -> ExitCode {
                 Ok(())
             }
             ["toggle"] => {
-                let muted = state()?["mic"]["mic.mute"].as_bool().unwrap_or(false);
+                let muted = state()?["mic"]["mic.mute"].as_bool().ok_or_else(|| fail("the mute state is unknown (is the mic connected?)"))?;
                 ack_or_fail(client::request(json!({"cmd": "set", "changes": {"mic.mute": !muted}}))).map(drop)
             }
             ["gain", n] if n.starts_with('+') || n.starts_with('-') => {
                 let delta: i64 = n.parse().map_err(|_| fail("gain takes n, +n or -n"))?;
                 let max = Descriptor::load().field("mic.gain").unwrap().max.unwrap_or(20.0) as i64;
-                let cur = state()?["mic"]["mic.gain"].as_i64().unwrap_or(0);
+                let cur = state()?["mic"]["mic.gain"].as_i64().ok_or_else(|| fail("the current gain is unknown (is the mic connected?)"))?;
                 ack_or_fail(client::request(json!({"cmd": "set", "changes": {"mic.gain": (cur + delta).clamp(0, max)}}))).map(drop)
             }
             ["gain", n] => {

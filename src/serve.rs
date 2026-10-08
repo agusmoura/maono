@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 /// How often a running Live monitor re-checks that the output is still headphones.
 const MONITOR_CHECK: Duration = Duration::from_secs(2);
+/// How often battery and charging are re-read while connected.
+const INFO_REFRESH: Duration = Duration::from_secs(60);
 
 pub enum Input {
     Line(String, Option<Sender<String>>),
@@ -42,6 +44,7 @@ pub fn run<A: Audio>(
     let mut was_connected = false;
     let mut next_probe = Instant::now();
     let mut next_monitor_check = Instant::now() + MONITOR_CHECK;
+    let mut next_info = Instant::now() + INFO_REFRESH;
     loop {
         if core.dev.is_none() && Instant::now() >= next_probe {
             match open() {
@@ -60,6 +63,10 @@ pub fn run<A: Audio>(
         if Instant::now() >= next_monitor_check {
             core.check_monitor();
             next_monitor_check = Instant::now() + MONITOR_CHECK;
+        }
+        if Instant::now() >= next_info {
+            core.refresh_info(); // a no-op while disconnected
+            next_info = Instant::now() + INFO_REFRESH;
         }
         flush(core, out, None)?;
         match inputs.recv_timeout(tick) {
