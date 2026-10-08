@@ -3983,8 +3983,8 @@ It restarts the Omarchy shell (the bar flickers for about 2 s) and temporarily s
 import json, subprocess, sys, copy, os
 
 REPO = os.path.expanduser("~/dev/maono")
-schema = json.loads(subprocess.run([os.path.expanduser("~/.local/bin/maono"), "schema"], capture_output=True, text=True).stdout or "null") \
-    or json.loads(subprocess.run(["cargo", "run", "-q", "--", "schema"], cwd=REPO, capture_output=True, text=True).stdout)
+# the repo's own build (plan 1 Task 12 built it); `schema` only reads embedded data
+schema = json.loads(subprocess.run([f"{REPO}/target/release/maono", "schema"], capture_output=True, text=True, check=True).stdout)
 presets = json.load(open(f"{REPO}/presets/eq/maono.json"))
 profiles = json.load(open(f"{REPO}/profiles/factory.json"))
 filt = copy.deepcopy(schema["filter"]["defaults"])
@@ -4034,7 +4034,7 @@ Make it executable (`chmod +x`). Check it on its own: `printf '{"id":1,"cmd":"se
 
 ```bash
 cp ~/.config/omarchy/shell.json /tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/shell.json.before-smoke
-cd ~/dev/maono && mise exec rust@stable -- cargo run -q -- shell install --force
+cd ~/dev/maono && mise exec rust@stable -- cargo build --release -q && ./target/release/maono shell install --force
 omarchy plugin disable maono
 omarchy plugin enable io.github.agusmoura.maono --section right
 omarchy bar set io.github.agusmoura.maono binary '"/tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/fake-serve.py"' --json
@@ -4058,7 +4058,7 @@ Wait 12 s, then:
    - the EQ curve is visible;
    - the swatches have colour;
    - no element overflows 420 px.
-5. Fix in the repo, re-run `node --test shell/tests/` and qmllint, reinstall with `cargo run -q -- shell install --force`, run `omarchy restart shell`, and look again.
+5. Fix in the repo, re-run `node --test shell/tests/` and qmllint, reinstall with `./target/release/maono shell install --force`, run `omarchy restart shell`, and look again.
 6. Never drive the panel with `wtype`. If Agus is using the desktop, stop and ask him to look.
 
 - [ ] **Step 4: Restore Agus's bar**
