@@ -479,14 +479,18 @@ impl<A: Audio> Core<A> {
                 Ok(v)
             }
             Cmd::MonitorSet { on, source, force } => {
-                if let Some(s) = source {
+                if let Some(s) = &source {
                     if s != "clean" && s != "raw" {
                         return Err(err("source must be clean or raw"));
                     }
-                    self.monitor_source = s;
                 }
                 if !on {
                     self.filterctl.audio.stop_monitor();
+                    // Picking a source while Live is off (the panel's Limpio/Crudo
+                    // chips) just remembers it for the next `on: true`.
+                    if let Some(s) = source {
+                        self.monitor_source = s;
+                    }
                     return Ok(json!({}));
                 }
                 if !force && self.filterctl.audio.output_is_headphones() != Some(true) {
@@ -495,11 +499,16 @@ impl<A: Audio> Core<A> {
                         "message": "the default output does not look like headphones; monitoring through speakers feeds back (send force: true to do it anyway)",
                     }));
                 }
-                let node = match self.monitor_source.as_str() {
+                // The requested source is resolved and started before it is
+                // remembered, so a refused `on: true` never changes what a later
+                // unqualified `on: true` would play.
+                let requested = source.unwrap_or_else(|| self.monitor_source.clone());
+                let node = match requested.as_str() {
                     "raw" => self.filterctl.audio.capture_target().ok_or_else(|| err("the mic is not visible in PipeWire"))?,
                     _ => self.fschema.source.node.clone(),
                 };
                 self.filterctl.audio.start_monitor(&node).map_err(err)?;
+                self.monitor_source = requested;
                 Ok(json!({ "monitoring": node }))
             }
         }
@@ -905,6 +914,36 @@ mod tests {
         assert_eq!(ask(&mut c, json!({"id": 3, "cmd": "monitor.set", "on": false}))["ok"], true);
         assert_eq!(c.filterctl.audio.monitor, None);
         assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "monitor.set", "on": true, "source": "loud"}))["ok"], false);
+    }
+
+    #[test]
+    fn refused_monitor_keeps_the_previous_source() {
+        let (mut c, _fake) = connected();
+        c.filterctl.audio.headphones = Some(false);
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true, "source": "raw"}));
+        assert_eq!(a["ok"], false, "{a}");
+        assert_eq!(c.state_json()["monitor"]["source"], "clean");
+        let a = ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "force": true}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+    }
+
+    #[test]
+    fn unknown_output_is_refused() {
+        let (mut c, _fake) = connected();
+        c.filterctl.audio.headphones = None;
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}));
+        assert_eq!((a["ok"].clone(), a["error"].clone()), (json!(false), json!("not-headphones")));
+        assert_eq!(c.filterctl.audio.monitor, None);
+    }
+
+    #[test]
+    fn monitor_off_can_still_change_the_remembered_source() {
+        let (mut c, _fake) = connected();
+        let a = ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": false, "source": "raw"}));
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(c.state_json()["monitor"]["source"], "raw");
+        assert_eq!(c.filterctl.audio.monitor, None);
     }
 
     #[test]
