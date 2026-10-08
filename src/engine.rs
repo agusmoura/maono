@@ -268,13 +268,22 @@ impl<A: Audio> Core<A> {
     pub fn connect(&mut self, mut dev: Device, reconnect: bool) {
         let mut pending = Vec::new();
         let id = self.desc.identity.clone();
-        let vendor = dev.get(id.vendor_id, &mut |f| pending.push(f.clone()));
-        let product = dev.get(id.product_id, &mut |f| pending.push(f.clone()));
-        if !matches!(vendor, Ok(v) if v == id.vendor) || !matches!(product, Ok(p) if id.products.contains(&p)) {
+        // Stop at the first failed read: a silent mic costs ~1.2 s per GET.
+        let ids = dev.get(id.vendor_id, &mut |f| pending.push(f.clone())).and_then(|v| Ok((v, dev.get(id.product_id, &mut |f| pending.push(f.clone()))?)));
+        // A read that failed (gone, I/O, no answer) says nothing about the
+        // device: it is not there yet, and serve's 1 s probe tries again.
+        let Ok((vendor, product)) = ids else {
+            self.dev = None;
+            self.model = None;
+            self.link = Link::Disconnected;
+            self.emit_state();
+            return;
+        };
+        if vendor != id.vendor || !id.products.contains(&product) {
             // serve re-probes every second; once we already know this device is
             // unsupported, do not emit the same identity error again and again.
             if self.link != Link::Unsupported {
-                self.emit(json!({ "ev": "error", "code": "identity", "message": format!("not a PD100W (vendor {vendor:?}, product {product:?})") }));
+                self.emit(json!({ "ev": "error", "code": "identity", "message": format!("not a PD100W (vendor 0x{vendor:04x}, product 0x{product:04x})") }));
             }
             self.dev = None;
             self.model = None;
@@ -730,6 +739,20 @@ mod tests {
         let (dev2, _fake2) = FakeMic::new(&regs);
         c.connect(dev2, false);
         assert!(!c.take_events().iter().any(|e| e["ev"] == "error"), "no second identity error");
+    }
+
+    #[test]
+    fn a_silent_identity_read_is_disconnected_not_unsupported() {
+        let (mut c, _) = core();
+        let (dev, fake) = FakeMic::new(&pd100w_regs());
+        fake.silent.store(true, std::sync::atomic::Ordering::SeqCst);
+        c.connect(dev, false);
+        assert_eq!(c.link, Link::Disconnected);
+        assert!(c.dev.is_none() && c.model.is_none());
+        let ev = c.take_events();
+        assert!(!ev.iter().any(|e| e["ev"] == "error"), "no identity error: {ev:?}");
+        assert!(ev.iter().any(|e| e["ev"] == "state" && e["device"] == "disconnected"));
+        assert_eq!(fake.reg(0x0045), Some(0), "nothing was written");
     }
 
     #[test]
