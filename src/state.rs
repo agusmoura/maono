@@ -63,15 +63,17 @@ fn read_color(dev: &mut Device, desc: &Descriptor, other: &mut dyn FnMut(&Frame)
             _ => Value::Null,
         });
     }
-    let color = match index {
-        None => Value::Null,
-        Some(i) if i < 8 => l.presets.iter().find(|p| p.value == i).map_or(Value::Null, |p| json!({"preset": p.name})),
-        Some(i) => custom
-            .get((i - 8) as usize)
-            .filter(|c| !c.is_null())
-            .map_or(Value::Null, |c| json!({"hsv": c})),
-    };
+    let color = index.map_or(Value::Null, |i| color_value(desc, i, &custom));
     Ok((color, Value::Array(custom)))
+}
+
+/// The selected-colour register as a value: `{"preset": name}` below 8, the
+/// custom slot's `{"hsv": ..}` from 8 up, null when that slot is unknown.
+pub fn color_value(desc: &Descriptor, index: u16, custom: &[Value]) -> Value {
+    if index < 8 {
+        return desc.light.presets.iter().find(|p| p.value == index).map_or(Value::Null, |p| json!({"preset": p.name}));
+    }
+    custom.get((index - 8) as usize).filter(|c| !c.is_null()).map_or(Value::Null, |c| json!({"hsv": c}))
 }
 
 /// `[h°, s, v]` with h in 0..360 and s, v in 0..1 -> raw `[h*100, s*100, v*100]`.

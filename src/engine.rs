@@ -348,8 +348,14 @@ impl<A: Audio> Core<A> {
             return;
         }
         for &(id, raw) in &f.fields {
-            let Some(field) = self.desc.field_by_id(id) else { continue };
-            let (key, v) = (field.key.clone(), field.from_raw(raw));
+            // The colour index is not a descriptor field: the light button cycles it.
+            let (key, v) = if id == self.desc.light.color {
+                let custom = self.mic.get("light.custom").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+                ("light.color".to_string(), state::color_value(&self.desc, raw, custom))
+            } else {
+                let Some(field) = self.desc.field_by_id(id) else { continue };
+                (field.key.clone(), field.from_raw(raw))
+            };
             if self.mic.get(&key) != Some(&v) {
                 self.mic.insert(key.clone(), v.clone());
                 if f.kind == SET {
@@ -787,6 +793,16 @@ mod tests {
         let ev = c.take_events();
         assert!(ev.iter().any(|e| e["ev"] == "changed" && e["key"] == "mic.mute" && e["value"] == true && e["source"] == "button"));
         assert_eq!(c.mic["mic.mute"], json!(true));
+    }
+
+    #[test]
+    fn light_button_colour_becomes_a_changed_event() {
+        let (mut c, fake) = connected();
+        fake.press(0x208C, 4);
+        c.pump(Duration::from_millis(50));
+        let ev = c.take_events();
+        assert!(ev.iter().any(|e| e["ev"] == "changed" && e["key"] == "light.color" && e["value"] == json!({"preset": "green"}) && e["source"] == "button"), "{ev:?}");
+        assert_eq!(c.mic["light.color"], json!({"preset": "green"}));
     }
 
     #[test]
