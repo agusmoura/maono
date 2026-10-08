@@ -49,7 +49,7 @@
   - Digits `1`–`6` pick a tab; `m` toggles mute; `v` toggles Live; `r` reapplies the profile.
   - An open text field blocks the catcher.
 - Optimistic UI: per key, with a request id. An ack settles only its own keys. The values in an ack's `effective`/`filter` are applied before the pending entry is dropped, so nothing flickers.
-- Real hardware (plugin install, `maono serve` started by the Service, PipeWire) happens only in Task 15, after Agus says yes, together with plan 1's Task 14.
+- Real hardware (plugin install, `maono serve` started by the Service, PipeWire) happens only in Task 16, after Agus says yes, together with plan 1's Task 14. Task 15 loads the real plugin in the shell against a fake backend (no mic, no PipeWire).
 - Verification commands:
   - `node --test shell/tests/`
   - QML syntax: `for f in shell/*.qml; do /usr/lib/qt6/bin/qmllint "$f" 2>&1 | grep '\[syntax\]' && echo "SYNTAX ERROR in $f"; done`. It must print nothing. Unresolved `qs.*` import warnings are expected and fine.
@@ -69,6 +69,7 @@
 3. A refused Live (`not-headphones`) shows the force prompt; any other failure shows the error, never a silent no-op. Test: Task 1 `live_refusal_is_classified`.
 4. The schema is missing a field (an older backend): rows fall back to the field's safe defaults instead of NaN/undefined ranges. Test: Task 1 `field_fallbacks`.
 5. Spanish and English tables drift apart: a missing key would show the raw key. Test: Task 3 `es_and_en_have_the_same_keys` plus `every_key_used_in_qml_exists`.
+6. A held `h`/`l` key or a fast bar wheel sends dozens of edits a second: at most one request per key is in flight, and the display shows the latest value throughout. Test: Task 1 `one_request_in_flight_per_key_latest_wins`.
 
 ---
 
@@ -83,7 +84,8 @@
 - `applyEvent(status, ev) -> status`: hello/state/changed/profiles/presets/reapplied/error, never mutating
 - `applyAck(status, ack) -> status`: merges `ack.effective` into `st.mic` and `ack.filter` into `st.filter`
 - `withNotice(status, notice)`, `withConfig(status, changes)`, `backendExited(status, exitCode)`
-- `withPending(pending, changes, id)`, `settlePending(pending, id)`, `effective(pending, map, key)`, `effectiveMap(pending, map)`, `getPath(obj, "a.b.0.c")`, `overlayFilter(filter, pendingFilter)`
+- `withPending(pending, changes, id)`, `settlePending(pending, id)`, `dropPending(pending, keys)`, `effective(pending, map, key)`, `effectiveMap(pending, map)`, `getPath(obj, "a.b.0.c")`, `overlayFilter(filter, pendingFilter)`
+- `emptyFlight()`, `planSend(flight, changes) -> {send|null, queued}`, `markSent(flight, keys, id)`, `ackFlight(flight, id) -> {flight, send|null}`: one request in flight per key, latest queued value wins
 - `field(schema, key)`, `filterField(schema, path)`, `fieldMin/fieldMax/fieldStep(schema, key, fallback)`, `filterMin/filterMax/filterStep(schema, path, fallback)`, `enumOptions(schema, key, tr)`, `groupKeys(schema, group, prefix, exclude)`, `fieldLabel(tr, key)`
 - `nrChoice(mic)`, `nrChanges(choice)`, `nrOptions(schema, tr)`
 - `nextProfileId(profiles, active)`, `profileName(profiles, id)`
@@ -166,6 +168,27 @@ test("older_ack_does_not_clear_newer_edit", () => {
   p = M.settlePending(p, 2)
   assert.equal(M.effective(p, { "mic.gain": 20 }, "mic.gain"), 20)
   assert.deepEqual(M.effectiveMap(M.withPending({}, { a: 1 }, 5), { a: 0, b: 2 }), { a: 1, b: 2 })
+})
+
+test("one_request_in_flight_per_key_latest_wins", () => {
+  let f = M.emptyFlight()
+  let p = M.planSend(f, { "mic.gain": 10 })
+  assert.deepEqual(p.send, { "mic.gain": 10 })
+  f = M.markSent({ inflight: f.inflight, queued: p.queued }, ["mic.gain"], 1)
+  for (const v of [11, 12, 13]) {
+    p = M.planSend(f, { "mic.gain": v })
+    assert.equal(p.send, null)
+    f = { inflight: f.inflight, queued: p.queued }
+  }
+  let a = M.ackFlight(f, 1)
+  assert.deepEqual(a.send, { "mic.gain": 13 }, "three held-key edits become one follow-up request")
+  f = M.markSent(a.flight, ["mic.gain"], 2)
+  a = M.ackFlight(f, 2)
+  assert.equal(a.send, null)
+  assert.deepEqual(JSON.parse(JSON.stringify(a.flight)), { inflight: {}, queued: {} })
+  f = M.markSent(M.emptyFlight(), ["mic.gain"], 7)
+  assert.deepEqual(M.planSend(f, { "mic.gain": 1, "light.on": true }).send, { "light.on": true }, "other keys are not blocked")
+  assert.deepEqual(JSON.parse(JSON.stringify(M.dropPending(M.withPending({}, { a: 1, b: 2 }, 0), ["a"]))), { b: { value: 2, id: 0 } })
 })
 
 test("paths and filter overlay", () => {
@@ -409,6 +432,41 @@ function effectiveMap(pending, map) {
   return out
 }
 
+// One request in flight per key; edits made meanwhile are queued and the latest wins.
+function emptyFlight() { return { inflight: {}, queued: {} } }
+
+function planSend(flight, changes) {
+  var send = {}, queued = copy(flight.queued), n = 0
+  for (var k in changes) {
+    if (flight.inflight[k] !== undefined) queued[k] = changes[k]
+    else { send[k] = changes[k]; n++ }
+  }
+  return { send: n ? send : null, queued: queued }
+}
+
+function markSent(flight, keys, id) {
+  var inf = copy(flight.inflight)
+  for (var i = 0; i < keys.length; i++) inf[keys[i]] = id
+  return { inflight: inf, queued: flight.queued }
+}
+
+// The ack for `id` frees its keys; queued values for them become the next request.
+function ackFlight(flight, id) {
+  var inf = {}, freed = []
+  for (var k in flight.inflight) { if (flight.inflight[k] === id) freed.push(k); else inf[k] = flight.inflight[k] }
+  var next = {}, rest = copy(flight.queued), n = 0
+  for (var i = 0; i < freed.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(rest, freed[i])) { next[freed[i]] = rest[freed[i]]; delete rest[freed[i]]; n++ }
+  }
+  return { flight: { inflight: inf, queued: rest }, send: n ? next : null }
+}
+
+function dropPending(pending, keys) {
+  var p = copy(pending)
+  for (var i = 0; i < keys.length; i++) delete p[keys[i]]
+  return p
+}
+
 function getPath(obj, path) {
   var parts = String(path).split(".")
   var v = obj
@@ -606,7 +664,7 @@ The glyph code points are Nerd Font Material Design icons. Task 15 confirms visu
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test shell/tests/`
-Expected: `# pass 19`, `# fail 0`.
+Expected: `# pass 20`, `# fail 0`.
 
 - [ ] **Step 5: Commit**
 
@@ -769,7 +827,7 @@ function chainResponse(s, samples) {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test shell/tests/`
-Expected: all pass (19 + 5).
+Expected: all pass (20 + 5).
 
 - [ ] **Step 5: Commit**
 
@@ -1282,7 +1340,7 @@ git commit -m "feat(panel): Spanish and English strings with parity and coverage
   - Functions:
     - `tr(key, params)`, `send(obj)`, `request(cmd, cb) -> id`, `report(ack)`
     - `value(key)`, `filterValue(path)`, `effectiveFilter()`
-    - `setMic(changes)`, `setFilter(changes)`, `setConfig(changes)`
+    - `setMic(changes)`, `setFilter(changes)` (one request in flight per key; the latest queued value wins), `setConfig(changes)`
     - `toggleMute()`, `applyProfile(id)`, `nextProfile()`, `setMonitor(on, source, force, cb)`, `toggleLive()`
     - `dismissNotice()`, `restart()`
   - IPC target `maono`: `toggle()`, `toggleMute()`, `nextProfile()`, `applyProfile(id)`, `live()`, `tab(index)`
@@ -1360,13 +1418,36 @@ Item {
   }
   function effectiveFilter() { return Model.overlayFilter(root.st ? root.st.filter : null, root.pendingFilter) }
 
+  // At most one request in flight per key (held keys and fast wheels would otherwise queue
+  // seconds of work in serve); edits made meanwhile wait, latest value wins.
+  property var micFlight: Model.emptyFlight()
+  property var filterFlight: Model.emptyFlight()
+
   function setMic(changes) {
+    var plan = Model.planSend(root.micFlight, changes)
+    root.micFlight = { inflight: root.micFlight.inflight, queued: plan.queued }
+    root.pending = Model.withPending(root.pending, changes, 0)
+    if (plan.send) root._sendMic(plan.send)
+  }
+  function _sendMic(changes) {
     var id = root.request({ cmd: "set", changes: changes }, root.report)
-    if (id > 0) root.pending = Model.withPending(root.pending, changes, id)
+    if (id > 0) {
+      root.micFlight = Model.markSent(root.micFlight, Object.keys(changes), id)
+      root.pending = Model.withPending(root.pending, changes, id)
+    } else root.pending = Model.dropPending(root.pending, Object.keys(changes))
   }
   function setFilter(changes) {
+    var plan = Model.planSend(root.filterFlight, changes)
+    root.filterFlight = { inflight: root.filterFlight.inflight, queued: plan.queued }
+    root.pendingFilter = Model.withPending(root.pendingFilter, changes, 0)
+    if (plan.send) root._sendFilter(plan.send)
+  }
+  function _sendFilter(changes) {
     var id = root.request({ cmd: "filter.set", changes: changes }, root.report)
-    if (id > 0) root.pendingFilter = Model.withPending(root.pendingFilter, changes, id)
+    if (id > 0) {
+      root.filterFlight = Model.markSent(root.filterFlight, Object.keys(changes), id)
+      root.pendingFilter = Model.withPending(root.pendingFilter, changes, id)
+    } else root.pendingFilter = Model.dropPending(root.pendingFilter, Object.keys(changes))
   }
   function setConfig(changes) {
     root.request({ cmd: "config.set", changes: changes }, function (ack) {
@@ -1404,7 +1485,13 @@ Item {
       root.status = Model.applyAck(root.status, ev)
       root.pending = Model.settlePending(root.pending, ev.id)
       root.pendingFilter = Model.settlePending(root.pendingFilter, ev.id)
+      var fm = Model.ackFlight(root.micFlight, ev.id)
+      var ff = Model.ackFlight(root.filterFlight, ev.id)
+      root.micFlight = fm.flight
+      root.filterFlight = ff.flight
       if (cb) cb(ev)
+      if (fm.send) root._sendMic(fm.send)
+      if (ff.send) root._sendFilter(ff.send)
       return
     }
     if (ev.ev === "hello") root._restarts = 0
@@ -1434,6 +1521,8 @@ Item {
       root.status = Model.backendExited(root.status, exitCode)
       root.pending = ({})
       root.pendingFilter = ({})
+      root.micFlight = Model.emptyFlight()
+      root.filterFlight = Model.emptyFlight()
       var cbs = root._callbacks
       root._callbacks = ({})
       for (var k in cbs) cbs[k]({ ev: "ack", id: Number(k), ok: false, error: "serve exited" })
@@ -3869,7 +3958,130 @@ git commit -m "feat(shell): install the new plugin atomically and validated; REA
 
 ---
 
-### Task 15: Install, migrate and verify on the desktop (REQUIRES Agus's explicit go-ahead; run together with plan 1 Task 14)
+### Task 15: Desktop smoke against a fake backend (no mic, no PipeWire)
+
+This is the first time the QML actually loads. qmllint only catches syntax errors. This task catches the errors only a real load shows:
+- wrong `qs.Ui` property names
+- binding errors
+- null reads
+- glyph code points that don't exist
+
+It runs before the hardware session.
+
+It restarts the Omarchy shell (the bar flickers for about 2 s) and temporarily swaps the upstream `maono` widget for the new one. Tell Agus first, and restore his bar at the end.
+
+**Files:**
+- Create: `/tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/fake-serve.py` (outside the repo and the plugin dir)
+
+- [ ] **Step 1: The fake backend**
+
+`fake-serve.py` speaks protocol 1 from read-only sources and keeps an in-memory state. It never touches the mic or PipeWire.
+
+```python
+#!/usr/bin/env python3
+"""Fake `maono serve` for the panel smoke test: protocol 1 over stdin/stdout, no hardware."""
+import json, subprocess, sys, copy, os
+
+REPO = os.path.expanduser("~/dev/maono")
+schema = json.loads(subprocess.run([os.path.expanduser("~/.local/bin/maono"), "schema"], capture_output=True, text=True).stdout or "null") \
+    or json.loads(subprocess.run(["cargo", "run", "-q", "--", "schema"], cwd=REPO, capture_output=True, text=True).stdout)
+presets = json.load(open(f"{REPO}/presets/eq/maono.json"))
+profiles = json.load(open(f"{REPO}/profiles/factory.json"))
+filt = copy.deepcopy(schema["filter"]["defaults"])
+mic = {"mic.mute": False, "mic.gain": 18, "mic.nr.on": True, "mic.nr.level": 0, "headphones.volume": 10, "headphones.monitor": 7,
+       "light.on": True, "light.brightness": 40, "light.effect": 0, "light.color": {"preset": "blue"}, "light.custom": [[330.0, 1.0, 1.0]],
+       "info.battery": 64, "info.charging": False, "info.firmware": "1.0.8", "info.serial": "PD100W-FAKE"}
+for f in schema["device"]["fields"]:
+    mic.setdefault(f["key"], f.get("min", False if f["type"] == "bool" else 0))
+st = {"device": "connected", "model": "wired", "activeProfile": "llamada", "dirty": False, "partial": None,
+      "defaultSource": "maono_clean", "cleanSource": "maono_clean", "filterApplied": True,
+      "deps": {"rnnoise": True, "comp": True}, "monitor": {"on": False, "source": "clean", "headphones": True}}
+
+def out(o): print(json.dumps(o), flush=True)
+def state(): out(dict(st, ev="state", mic=mic, filter=filt))
+def setpath(d, path, v):
+    parts = path.split("."); o = d
+    for p in parts[:-1]: o = o[int(p)] if p.isdigit() else o[p]
+    o[int(parts[-1]) if parts[-1].isdigit() else parts[-1]] = v
+
+out({"ev": "hello", "protocol": 1, "schema": schema, "presets": presets, "profiles": profiles, "config": {"version": 1, "applyOnReconnect": True}, "warnings": ["fake backend for the panel smoke test"]})
+state()
+for line in sys.stdin:
+    try: req = json.loads(line)
+    except ValueError: continue
+    ack = {"ev": "ack", "id": req.get("id"), "ok": True}
+    cmd = req.get("cmd")
+    if cmd == "set":
+        mic.update(req["changes"]); ack["effective"] = req["changes"]; st["dirty"] = True
+    elif cmd == "filter.set":
+        for k, v in req["changes"].items():
+            if k == "eq.preset":
+                p = next(x for x in presets if x["id"] == v); filt["eq"]["preset"] = v; filt["eq"]["bands"] = p["bands"]; filt["hpf"]["freq"] = p["hpf"]
+            else: setpath(filt, k, v)
+        ack["filter"] = filt; st["dirty"] = True
+    elif cmd == "profile.apply":
+        st["activeProfile"] = req["profile"]; st["dirty"] = False; ack["effective"] = {}
+    elif cmd == "monitor.set":
+        st["monitor"]["on"] = bool(req["on"]); st["monitor"]["source"] = req.get("source", st["monitor"]["source"])
+    elif cmd == "source.default":
+        st["defaultSource"] = "maono_clean" if req["which"] == "clean" else "alsa_input.fake"
+    out(ack); state()
+```
+
+Make it executable (`chmod +x`). Check it on its own: `printf '{"id":1,"cmd":"set","changes":{"mic.gain":12}}\n' | ./fake-serve.py` prints hello, state, ack and state. It ignores the `serve` argument the Service passes.
+
+- [ ] **Step 2: Load the plugin against the fake**
+
+```bash
+cp ~/.config/omarchy/shell.json /tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/shell.json.before-smoke
+cd ~/dev/maono && mise exec rust@stable -- cargo run -q -- shell install --force
+omarchy plugin disable maono
+omarchy plugin enable io.github.agusmoura.maono --section right
+omarchy bar set io.github.agusmoura.maono binary '"/tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/fake-serve.py"' --json
+omarchy restart shell
+```
+
+Wait 12 s, then:
+- `journalctl --user --since -1min --no-pager | grep -iE "io.github.agusmoura|qml|TypeError|ReferenceError"` must show no errors from the plugin's files;
+- `pgrep -af fake-serve` shows one process;
+- `pgrep -af "maono serve"` shows none (the real backend never started).
+
+- [ ] **Step 3: Visual pass**
+
+1. Open the panel with `omarchy-shell shell toggle io.github.agusmoura.maono '{}'`.
+2. Visit each tab with `omarchy-shell maono tab <n>` for n = 1..6. With the upstream widget disabled, the `maono` IPC target belongs to the new Service.
+3. Capture each tab with `grim`, cropped to the panel (geometry from `hyprctl layers -j`, namespace containing `quickshell`), and read the screenshots.
+4. Check:
+   - the labels are translated;
+   - every glyph renders (wrong code points go in `GLYPHS`);
+   - the meter bar is drawn;
+   - the EQ curve is visible;
+   - the swatches have colour;
+   - no element overflows 420 px.
+5. Fix in the repo, re-run `node --test shell/tests/` and qmllint, reinstall with `cargo run -q -- shell install --force`, run `omarchy restart shell`, and look again.
+6. Never drive the panel with `wtype`. If Agus is using the desktop, stop and ask him to look.
+
+- [ ] **Step 4: Restore Agus's bar**
+
+```bash
+omarchy plugin disable io.github.agusmoura.maono
+omarchy plugin enable maono --section right
+cp /tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/shell.json.before-smoke ~/.config/omarchy/shell.json
+omarchy restart shell
+```
+
+Then compare: `diff <(python3 -m json.tool ~/.config/omarchy/shell.json) <(python3 -m json.tool /tmp/claude-1000/-home-agus/ea1adf2a-09b5-41df-ac13-a30ca564669c/scratchpad/shell.json.before-smoke)` must be empty.
+
+- [ ] **Step 5: Commit the fixes**
+
+```bash
+git add shell/
+git commit -m "fix(panel): issues found loading the plugin against a fake backend"
+```
+
+---
+
+### Task 16: Install, migrate and verify on the desktop (REQUIRES Agus's explicit go-ahead; run together with plan 1 Task 14)
 
 **Do not start without Agus saying yes in the conversation.** This task:
 - starts `maono serve` through the Service, which rewrites the filter conf on first start and restarts `filter-chain.service`;
