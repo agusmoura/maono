@@ -117,6 +117,8 @@ pub struct Core<A: Audio> {
     pub owner: bool,
     /// Which source `monitor.set` plays when it is turned on; never persisted.
     monitor_source: String,
+    /// The running monitor was started with `force`: `check_monitor` leaves it alone.
+    monitor_forced: bool,
     partial: Option<Value>,
     /// Unsaved mic/filter values from before a reconnect reapplied the profile.
     recover: Option<(Values, FilterState)>,
@@ -154,6 +156,7 @@ impl<A: Audio> Core<A> {
             mic: Values::new(),
             owner: true,
             monitor_source: "clean".into(),
+            monitor_forced: false,
             partial: None,
             recover: None,
             warnings,
@@ -214,7 +217,7 @@ impl<A: Audio> Core<A> {
             "mic": self.mic,
             "filter": self.filter,
             "filterApplied": self.filterctl.is_applied(),
-            "deps":{ "rnnoise": deps.rnnoise, "comp": deps.comp },
+            "deps": { "rnnoise": deps.rnnoise, "comp": deps.comp },
             "activeProfile": active,
             "dirty": dirty,
             "partial": self.partial,
@@ -529,11 +532,28 @@ impl<A: Audio> Core<A> {
                     "raw" => self.filterctl.audio.capture_target().ok_or_else(|| err("the mic is not visible in PipeWire"))?,
                     _ => self.fschema.source.node.clone(),
                 };
-                self.filterctl.audio.start_monitor(&node).map_err(err)?;
+                // Pinned to today's default output, so it never follows a later default.
+                let sink = self.filterctl.audio.default_sink();
+                if sink.is_none() && !force {
+                    return Err(err("the default output is unknown; nothing to pin the monitor to"));
+                }
+                self.filterctl.audio.start_monitor(&node, sink.as_deref()).map_err(err)?;
                 self.monitor_source = requested;
-                Ok(json!({ "monitoring": node }))
+                self.monitor_forced = force;
+                Ok(json!({ "monitoring": node, "sink": sink }))
             }
         }
+    }
+
+    /// serve calls this every ~2 s: an unforced monitor stops as soon as the
+    /// default output no longer looks like headphones.
+    pub fn check_monitor(&mut self) {
+        if self.monitor_forced || !self.filterctl.audio.monitor_running() || self.filterctl.audio.output_is_headphones() == Some(true) {
+            return;
+        }
+        self.filterctl.audio.stop_monitor();
+        self.emit_state();
+        self.emit(json!({ "ev": "error", "code": "monitor", "message": "output is no longer headphones; Live stopped" }));
     }
 
     fn refresh(&mut self) -> Result<Value, Value> {
@@ -972,6 +992,40 @@ mod tests {
         let a = ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "force": true}));
         assert_eq!(a["ok"], true, "{a}");
         assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+    }
+
+    #[test]
+    fn monitor_is_pinned_to_the_default_sink() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor_sink.as_deref(), Some("alsa_output.test"));
+        ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": false}));
+        c.filterctl.audio.sink = None;
+        let a = ask(&mut c, json!({"id": 3, "cmd": "monitor.set", "on": true}));
+        assert_eq!(a["ok"], false, "an unknown sink is refused unless forced: {a}");
+        assert_eq!(c.filterctl.audio.monitor, None);
+        assert_eq!(ask(&mut c, json!({"id": 4, "cmd": "monitor.set", "on": true, "force": true}))["ok"], true);
+        assert_eq!(c.filterctl.audio.monitor_sink, None);
+    }
+
+    #[test]
+    fn monitor_stops_when_the_output_stops_being_headphones() {
+        let (mut c, _fake) = connected();
+        assert_eq!(ask(&mut c, json!({"id": 1, "cmd": "monitor.set", "on": true}))["ok"], true);
+        c.check_monitor();
+        assert!(c.take_events().is_empty(), "headphones still: nothing happens");
+        c.filterctl.audio.headphones = Some(false);
+        c.check_monitor();
+        assert_eq!(c.filterctl.audio.monitor, None);
+        let ev = c.take_events();
+        assert!(ev.iter().any(|e| e["ev"] == "state" && e["monitor"]["on"] == false), "{ev:?}");
+        assert!(ev.iter().any(|e| e["ev"] == "error" && e["code"] == "monitor"), "{ev:?}");
+        // A monitor forced onto speakers is left alone.
+        assert_eq!(ask(&mut c, json!({"id": 2, "cmd": "monitor.set", "on": true, "force": true}))["ok"], true);
+        c.take_events();
+        c.check_monitor();
+        assert_eq!(c.filterctl.audio.monitor.as_deref(), Some("maono_clean"));
+        assert!(c.take_events().is_empty());
     }
 
     #[test]

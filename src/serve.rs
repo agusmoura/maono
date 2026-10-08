@@ -14,6 +14,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How often a running Live monitor re-checks that the output is still headphones.
+const MONITOR_CHECK: Duration = Duration::from_secs(2);
+
 pub enum Input {
     Line(String, Option<Sender<String>>),
     Eof,
@@ -38,6 +41,7 @@ pub fn run<A: Audio>(
     core.hello();
     let mut was_connected = false;
     let mut next_probe = Instant::now();
+    let mut next_monitor_check = Instant::now() + MONITOR_CHECK;
     loop {
         if core.dev.is_none() && Instant::now() >= next_probe {
             match open() {
@@ -52,6 +56,10 @@ pub fn run<A: Audio>(
             // ponytail: fixed backoff per link state, not adaptive across many
             // unsupported devices at once; fine for one stray USB receiver.
             next_probe = Instant::now() + if core.link == Link::Unsupported { unsupported_retry } else { probe_every };
+        }
+        if Instant::now() >= next_monitor_check {
+            core.check_monitor();
+            next_monitor_check = Instant::now() + MONITOR_CHECK;
         }
         flush(core, out, None)?;
         match inputs.recv_timeout(tick) {

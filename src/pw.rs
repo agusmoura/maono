@@ -1,6 +1,6 @@
 //! Everything that touches PipeWire / systemd, behind the `Audio` trait.
 
-use crate::filter::{Deps, FilterSchema};
+use crate::filter::{Deps, FilterSchema, MonitorMeta};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -17,8 +17,11 @@ pub trait Audio {
     fn restart(&mut self) -> io::Result<()>;
     fn default_source(&mut self) -> Option<String>;
     fn set_default_source(&mut self, name: &str) -> io::Result<()>;
-    /// Play `source` (a PipeWire source node name) into the default output, replacing a running monitor.
-    fn start_monitor(&mut self, source: &str) -> io::Result<()>;
+    /// node.name of the default output, None when unknown.
+    fn default_sink(&mut self) -> Option<String>;
+    /// Play `source` (a PipeWire source node name) into `sink` (the default
+    /// output when None), replacing a running monitor.
+    fn start_monitor(&mut self, source: &str, sink: Option<&str>) -> io::Result<()>;
     fn stop_monitor(&mut self);
     fn monitor_running(&mut self) -> bool;
     /// Some(true/false) when the default output clearly is / is not headphones; None when unknown.
@@ -90,6 +93,19 @@ pub fn node_params(dump: &Value, node_name: &str) -> Option<(u64, BTreeMap<Strin
 pub fn props_arg(params: &[(String, f64)]) -> String {
     let body = params.iter().map(|(k, v)| format!("\"{k}\" {v}")).collect::<Vec<_>>().join(" ");
     format!("{{ params = [ {body} ] }}")
+}
+
+/// pw-loopback's argv. `-n` stays first: `System::new` finds strays by
+/// "pw-loopback -n <node>". The playback side is pinned to `sink` and never
+/// moved elsewhere (no falling back to speakers when a headset drops).
+pub fn monitor_args(m: &MonitorMeta, source: &str, sink: Option<&str>) -> Vec<String> {
+    let mut a: Vec<String> = ["-n", m.node.as_str(), "-c", "1", "-m", "[ MONO ]", "-l", &m.latency_ms.to_string(), "-C", source, "-o", "{ node.dont-reconnect = true }"]
+        .map(String::from)
+        .into();
+    if let Some(s) = sink {
+        a.extend(["-P".into(), s.into()]);
+    }
+    a
 }
 
 fn run(cmd: &str, args: &[&str]) -> io::Result<String> {
@@ -164,16 +180,37 @@ impl Audio for System {
         run("pactl", &["set-default-source", name]).map(drop)
     }
 
-    fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+    fn default_sink(&mut self) -> Option<String> {
+        run("pactl", &["get-default-sink"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    fn start_monitor(&mut self, source: &str, sink: Option<&str>) -> io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        unsafe extern "C" {
+            fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+        }
+        const PR_SET_PDEATHSIG: std::ffi::c_int = 1;
+        const SIGTERM: std::ffi::c_ulong = 15;
         self.stop_monitor();
-        let m = &self.schema.monitor;
-        let child = Command::new("pw-loopback")
-            .args(["-n", m.node.as_str(), "-c", "1", "-m", "[ MONO ]", "-l", &m.latency_ms.to_string(), "-C", source])
+        let mut cmd = Command::new("pw-loopback");
+        cmd.args(monitor_args(&self.schema.monitor, source, sink))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        self.monitor = Some(child);
+            .stderr(std::process::Stdio::null());
+        // SAFETY: runs in the forked child before exec; prctl is a plain
+        // syscall wrapper (async-signal-safe, no allocation, no shared state).
+        // It makes the kernel SIGTERM pw-loopback when the thread that spawned
+        // it dies: serve's main loop thread, which handles every monitor.set.
+        // glibc reads arg2 as unsigned long, hence the c_ulong.
+        // ponytail: a serve killed between fork and prctl leaves the child
+        // running; System::new's pkill on the next start is the backstop.
+        unsafe {
+            cmd.pre_exec(|| {
+                prctl(PR_SET_PDEATHSIG, SIGTERM);
+                Ok(())
+            });
+        }
+        self.monitor = Some(cmd.spawn()?);
         Ok(())
     }
 
@@ -189,7 +226,7 @@ impl Audio for System {
     }
 
     fn output_is_headphones(&mut self) -> Option<bool> {
-        let default = run("pactl", &["get-default-sink"]).ok()?.trim().to_string();
+        let default = self.default_sink()?;
         let sinks: Value = serde_json::from_str(&run("pactl", &["-f", "json", "list", "sinks"]).ok()?).ok()?;
         let sink = sinks.as_array()?.iter().find(|s| s["name"] == default.as_str())?;
         Some(sink_is_headphones(sink, &self.schema.monitor.headphone_hints))
@@ -213,6 +250,9 @@ pub mod fake {
         /// restart() returns Err once `restarts` exceeds this value.
         pub fail_restart_after: Option<u32>,
         pub monitor: Option<String>,
+        /// The sink the running monitor was pinned to.
+        pub monitor_sink: Option<String>,
+        pub sink: Option<String>,
         pub headphones: Option<bool>,
         conf: PathBuf,
     }
@@ -229,6 +269,8 @@ pub mod fake {
                 default: None,
                 fail_restart_after: None,
                 monitor: None,
+                monitor_sink: None,
+                sink: Some("alsa_output.test".into()),
                 headphones: Some(true),
                 conf: conf.to_path_buf(),
             }
@@ -285,12 +327,17 @@ pub mod fake {
             self.default = Some(name.into());
             Ok(())
         }
-        fn start_monitor(&mut self, source: &str) -> io::Result<()> {
+        fn default_sink(&mut self) -> Option<String> {
+            self.sink.clone()
+        }
+        fn start_monitor(&mut self, source: &str, sink: Option<&str>) -> io::Result<()> {
             self.monitor = Some(source.into());
+            self.monitor_sink = sink.map(String::from);
             Ok(())
         }
         fn stop_monitor(&mut self) {
             self.monitor = None;
+            self.monitor_sink = None;
         }
         fn monitor_running(&mut self) -> bool {
             self.monitor.is_some()
@@ -329,6 +376,16 @@ mod tests {
     fn props_arg_formats_pw_cli_syntax() {
         assert_eq!(props_arg(&[("hp1:Freq".into(), 120.0), ("rnnoise:VAD Threshold (%)".into(), 80.0)]),
             "{ params = [ \"hp1:Freq\" 120 \"rnnoise:VAD Threshold (%)\" 80 ] }");
+    }
+
+    #[test]
+    fn monitor_args_pin_the_sink_and_never_reconnect() {
+        let m = FilterSchema::load().monitor;
+        let lat = m.latency_ms.to_string();
+        let mut want = vec!["-n", m.node.as_str(), "-c", "1", "-m", "[ MONO ]", "-l", lat.as_str(), "-C", "maono_clean", "-o", "{ node.dont-reconnect = true }"];
+        assert_eq!(monitor_args(&m, "maono_clean", None), want);
+        want.extend(["-P", "alsa_output.usb-headset"]);
+        assert_eq!(monitor_args(&m, "maono_clean", Some("alsa_output.usb-headset")), want);
     }
 
     #[test]
