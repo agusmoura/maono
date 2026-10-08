@@ -170,11 +170,14 @@ impl<A: Audio> Core<A> {
     }
 
     /// Take over a matching chain without a restart, or (re)build it once.
+    fn try_start_filter(&mut self) -> Result<(), String> {
+        if self.filterctl.adopt(&self.filter) { Ok(()) } else { self.filterctl.apply(&self.filter).map(drop) }
+    }
+
+    /// At startup, before `hello`: a failure rides in hello's warnings.
     pub fn start_filter(&mut self) {
-        if !self.filterctl.adopt(&self.filter) {
-            if let Err(e) = self.filterctl.apply(&self.filter) {
-                self.warnings.push(format!("filter: {e}"));
-            }
+        if let Err(e) = self.try_start_filter() {
+            self.warnings.push(format!("filter: {e}"));
         }
     }
 
@@ -210,7 +213,8 @@ impl<A: Audio> Core<A> {
             "model": self.model,
             "mic": self.mic,
             "filter": self.filter,
-            "deps": { "rnnoise": deps.rnnoise, "comp": deps.comp },
+            "filterApplied": self.filterctl.is_applied(),
+            "deps":{ "rnnoise": deps.rnnoise, "comp": deps.comp },
             "activeProfile": active,
             "dirty": dirty,
             "partial": self.partial,
@@ -317,7 +321,10 @@ impl<A: Audio> Core<A> {
             self.on_frame(f);
         }
         if self.owner && !self.filterctl.is_applied() {
-            self.start_filter();
+            // After hello, so a failure is an event the panel shows, not a warning.
+            if let Err(e) = self.try_start_filter() {
+                self.emit(json!({ "ev": "error", "code": "filter", "message": e }));
+            }
         }
         if reconnect && self.config.apply_on_reconnect {
             if let Some(id) = self.config.active_profile.clone() {
@@ -759,6 +766,19 @@ mod tests {
         assert!(!ev.iter().any(|e| e["ev"] == "error"), "no identity error: {ev:?}");
         assert!(ev.iter().any(|e| e["ev"] == "state" && e["device"] == "disconnected"));
         assert_eq!(fake.reg(0x0045), Some(0), "nothing was written");
+    }
+
+    #[test]
+    fn a_filter_that_fails_on_connect_is_an_error_event() {
+        let (mut c, _fake) = connected();
+        assert_eq!(c.state_json()["filterApplied"], true);
+        let (mut c, _) = core();
+        c.filterctl.audio.broken = true;
+        let (dev, _fake) = FakeMic::new(&pd100w_regs());
+        c.connect(dev, false);
+        let ev = c.take_events();
+        assert!(ev.iter().any(|e| e["ev"] == "error" && e["code"] == "filter" && e["message"].is_string()), "{ev:?}");
+        assert_eq!(ev.last().unwrap()["filterApplied"], false);
     }
 
     #[test]
