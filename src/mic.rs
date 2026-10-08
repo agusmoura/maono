@@ -170,7 +170,7 @@ impl Mic {
 }
 
 /// `O_NONBLOCK` without pulling in the `libc` crate for one constant.
-const fn libc_o_nonblock() -> i32 {
+pub(crate) const fn libc_o_nonblock() -> i32 {
     0o4000
 }
 

@@ -4,8 +4,12 @@ use crate::proto::{self, Frame, GET, MAX_PAIRS, REPORT_LEN};
 use crate::safety::{self, Refused};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -84,41 +88,67 @@ fn io_or_gone(e: io::Error) -> DevError {
     }
 }
 
+/// Feed every report from a nonblocking `reader` into `tx`; `Gone` at end of
+/// file or on an error. With nothing to read it exits once `alive` is cleared
+/// (the Device was dropped), so a silent mic never strands the thread and fd.
+// ponytail: a 10 ms sleep-poll instead of poll(2) plus a wakeup fd; enough for
+// one mic, revisit if the idle wakeups ever matter.
+fn spawn_reader<R: Read + Send + 'static>(mut reader: R, alive: Arc<AtomicBool>, tx: Sender<Incoming>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    if tx.send(Incoming::Frames(proto::decode(&buf[..n]))).is_err() {
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if !alive.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => {
+                    let _ = tx.send(Incoming::Gone);
+                    return;
+                }
+            }
+        }
+    })
+}
+
 pub struct Device {
     link: Box<dyn Link>,
     rx: Receiver<Incoming>,
     pub model: Model,
+    /// Cleared on drop to stop the hidraw reader thread (unused by fakes).
+    alive: Arc<AtomicBool>,
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Device {
     pub fn new(link: Box<dyn Link>, rx: Receiver<Incoming>, model: Model) -> Self {
-        Device { link, rx, model }
+        Device { link, rx, model, alive: Arc::new(AtomicBool::new(true)) }
     }
 
-    /// Open the hidraw node. A blocking reader thread feeds every report into
-    /// the channel and sends `Gone` when the node disappears.
+    /// Open the hidraw node nonblocking. A reader thread feeds every report
+    /// into the channel, sends `Gone` when the node disappears, and ends when
+    /// this Device is dropped. Writes share the fd; a write that would block
+    /// surfaces as `DevError::Io` (EAGAIN), never as a silent retry.
     pub fn open(found: &Found) -> io::Result<Device> {
-        let file = OpenOptions::new().read(true).write(true).open(&found.hidraw)?;
-        let mut reader = file.try_clone()?;
+        let file = OpenOptions::new().read(true).write(true).custom_flags(crate::mic::libc_o_nonblock()).open(&found.hidraw)?;
+        let reader = file.try_clone()?;
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 512];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        if tx.send(Incoming::Frames(proto::decode(&buf[..n]))).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    _ => {
-                        let _ = tx.send(Incoming::Gone);
-                        return;
-                    }
-                }
-            }
-        });
-        Ok(Device::new(Box::new(file), rx, found.model))
+        let dev = Device::new(Box::new(file), rx, found.model);
+        spawn_reader(reader, dev.alive.clone(), tx);
+        Ok(dev)
     }
 
     /// Write fields. Nothing is sent unless every pair passes `safety`.
@@ -236,6 +266,43 @@ mod tests {
         let pairs: Vec<(u16, i64)> = (0..15).map(|i| (0x208F + i, if i % 3 == 0 { 100 } else { 50 })).collect();
         dev.set(&pairs).unwrap();
         assert_eq!(fake.writes().len(), 15);
+    }
+
+    /// Waits up to `ms` for the reader thread to end.
+    fn finishes_within(h: &std::thread::JoinHandle<()>, ms: u64) -> bool {
+        let end = Instant::now() + Duration::from_millis(ms);
+        while !h.is_finished() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.is_finished()
+    }
+
+    #[test]
+    fn reader_reports_end_of_file_as_gone() {
+        let path = tempdir("reader").join("empty");
+        fs::write(&path, b"").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let h = spawn_reader(File::open(&path).unwrap(), Arc::new(AtomicBool::new(true)), tx);
+        assert!(matches!(rx.recv_timeout(Duration::from_millis(200)), Ok(Incoming::Gone)));
+        assert!(finishes_within(&h, 200));
+    }
+
+    /// A nonblocking hidraw node with nothing to read, as when the mic is off.
+    struct NoData;
+    impl Read for NoData {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    #[test]
+    fn dropping_the_device_stops_its_reader() {
+        let (dev, _fake) = FakeMic::new(&pd100w_regs());
+        let (tx, _rx) = mpsc::channel();
+        let h = spawn_reader(NoData, dev.alive.clone(), tx);
+        assert!(!finishes_within(&h, 50), "keeps waiting while the Device lives");
+        drop(dev);
+        assert!(finishes_within(&h, 200), "the reader thread ended after the drop");
     }
 
     #[test]
