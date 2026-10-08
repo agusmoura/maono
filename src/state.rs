@@ -53,9 +53,13 @@ fn read_serial(dev: &mut Device, desc: &Descriptor, other: &mut dyn FnMut(&Frame
 fn read_color(dev: &mut Device, desc: &Descriptor, other: &mut dyn FnMut(&Frame)) -> Result<(Value, Value), DevError> {
     let l = &desc.light;
     let index = get_opt(dev, l.color, other)?;
-    let count = get_opt(dev, l.count, other)?.unwrap_or(0).min(l.custom_max);
+    // An unanswered count is unknown (null), never "no custom colours": an
+    // empty list would let the next hsv write reuse slot 0 over a real colour.
+    let Some(count) = get_opt(dev, l.count, other)? else {
+        return Ok((index.map_or(Value::Null, |i| color_value(desc, i, &[])), Value::Null));
+    };
     let mut custom = Vec::new();
-    for k in 0..count {
+    for k in 0..count.min(l.custom_max) {
         let b = l.base + 3 * k;
         let hsv = (get_opt(dev, b, other)?, get_opt(dev, b + 1, other)?, get_opt(dev, b + 2, other)?);
         custom.push(match hsv {
@@ -104,8 +108,9 @@ pub fn same_color(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn custom_list(current: &Values) -> Vec<Value> {
-    current.get("light.custom").and_then(Value::as_array).cloned().unwrap_or_default()
+/// The known custom colours; an unknown list (null) refuses every slot write.
+fn custom_list(current: &Values) -> Result<&Vec<Value>, String> {
+    current.get("light.custom").and_then(Value::as_array).ok_or_else(|| "light.custom: unknown, refresh and retry".into())
 }
 
 fn plan_color(desc: &Descriptor, v: &Value, current: &Values) -> Result<Vec<(u16, i64)>, String> {
@@ -116,7 +121,7 @@ fn plan_color(desc: &Descriptor, v: &Value, current: &Values) -> Result<Vec<(u16
         return Ok(vec![(l.color, p.value as i64)]);
     }
     let raw = hsv_raw(v.get("hsv")).unwrap();
-    let custom = custom_list(current);
+    let custom = custom_list(current)?;
     if let Some(k) = custom.iter().position(|c| hsv_raw(Some(c)) == Some(raw)) {
         return Ok(vec![(l.color, 8 + k as i64)]);
     }
@@ -177,7 +182,7 @@ fn read_light_into(dev: &mut Device, desc: &Descriptor, out: &mut Values, other:
 }
 
 pub fn custom_update(dev: &mut Device, desc: &Descriptor, current: &Values, index: usize, hsv: &Value, other: &mut dyn FnMut(&Frame)) -> Result<Values, ApplyError> {
-    if index >= custom_list(current).len() {
+    if index >= custom_list(current).map_err(|e| ApplyError::Invalid(vec![e]))?.len() {
         return Err(ApplyError::Invalid(vec![format!("light.custom: no colour at {index}")]));
     }
     let raw = hsv_raw(Some(hsv)).ok_or_else(|| ApplyError::Invalid(vec!["light.custom: hsv must be [h, s, v]".into()]))?;
@@ -192,7 +197,7 @@ pub fn custom_update(dev: &mut Device, desc: &Descriptor, current: &Values, inde
 /// colour index follows its colour (a deleted selection falls back to white).
 pub fn custom_delete(dev: &mut Device, desc: &Descriptor, current: &Values, index: usize, other: &mut dyn FnMut(&Frame)) -> Result<Values, ApplyError> {
     let l = &desc.light;
-    let custom = custom_list(current);
+    let custom = custom_list(current).map_err(|e| ApplyError::Invalid(vec![e]))?;
     if index >= custom.len() {
         return Err(ApplyError::Invalid(vec![format!("light.custom: no colour at {index}")]));
     }
@@ -209,7 +214,8 @@ pub fn custom_delete(dev: &mut Device, desc: &Descriptor, current: &Values, inde
         pairs.extend([(b, raw[0]), (b + 1, raw[1]), (b + 2, raw[2])]);
     }
     pairs.push((l.count, custom.len() as i64 - 1));
-    let selected = get_opt(dev, l.color, other).map_err(ApplyError::Device)?.unwrap_or(0) as usize;
+    // No guessing: an unanswered selection refuses (Timeout) before anything is written.
+    let selected = dev.get(l.color, other).map_err(ApplyError::Device)? as usize;
     let deleted = 8 + index;
     if selected == deleted {
         pairs.push((l.color, 0));
@@ -312,6 +318,46 @@ mod tests {
         let cur = values(json!({"light.custom": [[10, 1, 1], null]}));
         let r = custom_delete(&mut dev, &d, &cur, 0, &mut |_| {});
         assert!(matches!(r, Err(ApplyError::Invalid(_))), "{r:?}");
+        assert!(fake.writes().is_empty());
+    }
+
+    #[test]
+    fn unknown_custom_count_reads_as_null_not_empty() {
+        let d = Descriptor::load();
+        let mut regs = pd100w_regs();
+        regs.retain(|&(id, _)| id != 0x208E); // the count register never answers
+        let (mut dev, _fake) = FakeMic::new(&regs);
+        let v = read_all(&mut dev, &d, &mut |_| {}).unwrap();
+        assert_eq!(v["light.custom"], Value::Null);
+        assert_eq!(v["light.color"], json!({"preset": "red"}), "a preset index still reads");
+    }
+
+    #[test]
+    fn unknown_custom_list_refuses_slot_writes_and_writes_nothing() {
+        let d = Descriptor::load();
+        let (mut dev, fake) = FakeMic::new(&pd100w_regs());
+        let cur = values(json!({"light.custom": null}));
+        let r = apply(&mut dev, &d, &values(json!({"light.color": {"hsv": [330, 1, 1]}})), &cur, &mut |_| {});
+        match r {
+            Err(ApplyError::Invalid(e)) => assert_eq!(e, vec!["light.custom: unknown, refresh and retry"]),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(custom_update(&mut dev, &d, &cur, 0, &json!([10, 1, 1]), &mut |_| {}), Err(ApplyError::Invalid(_))));
+        assert!(matches!(custom_delete(&mut dev, &d, &cur, 0, &mut |_| {}), Err(ApplyError::Invalid(_))));
+        assert!(fake.writes().is_empty());
+        // a preset needs no slot: it still applies
+        apply(&mut dev, &d, &values(json!({"light.color": {"preset": "blue"}})), &cur, &mut |_| {}).unwrap();
+        assert_eq!(fake.writes(), vec![(0x208C, 6)]);
+    }
+
+    #[test]
+    fn delete_refuses_when_the_selected_colour_does_not_answer() {
+        let d = Descriptor::load();
+        let mut regs = pd100w_regs();
+        regs.retain(|&(id, _)| id != 0x208C);
+        let (mut dev, fake) = FakeMic::new(&regs);
+        let cur = values(json!({"light.custom": [[10, 1, 1]]}));
+        assert!(custom_delete(&mut dev, &d, &cur, 0, &mut |_| {}).is_err());
         assert!(fake.writes().is_empty());
     }
 
